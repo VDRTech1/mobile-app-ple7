@@ -241,10 +241,18 @@ fn create_utun() -> Result<(i32, String), String> {
 
     // ctl_info structure (100 bytes: 4 + 96)
     #[repr(C)]
-    #[derive(Default)]
     struct CtlInfo {
         ctl_id: u32,
         ctl_name: [libc::c_char; 96],
+    }
+
+    impl Default for CtlInfo {
+        fn default() -> Self {
+            Self {
+                ctl_id: 0,
+                ctl_name: [0; 96],
+            }
+        }
     }
 
     // sockaddr_ctl structure
