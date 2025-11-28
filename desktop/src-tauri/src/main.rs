@@ -17,12 +17,19 @@ use tokio::sync::Mutex;
 use tunnel::{TunnelManager, AppState};
 
 fn get_log_path() -> std::path::PathBuf {
-    // Try to get the executable directory, fallback to current dir
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-        .join("ple7-debug.log")
+    // Use ~/Library/Logs on macOS, temp dir on other platforms
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            let log_dir = std::path::PathBuf::from(home).join("Library/Logs");
+            if log_dir.exists() {
+                return log_dir.join("ple7-vpn.log");
+            }
+        }
+    }
+
+    // Fallback to temp directory
+    std::env::temp_dir().join("ple7-vpn.log")
 }
 
 fn log_to_file(msg: &str) {
