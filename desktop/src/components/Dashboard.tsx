@@ -17,6 +17,9 @@ import {
   RefreshCw,
   Router,
   Server,
+  Terminal,
+  X,
+  Copy,
 } from "lucide-react";
 import PleiadesLogo from "./PleiadesLogo";
 
@@ -87,11 +90,22 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
   const [error, setError] = useState("");
   const [appVersion, setAppVersion] = useState("");
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
+  const [showLogs, setShowLogs] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  const addLog = (message: string) => {
+    const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+    setLogs(prev => [...prev.slice(-100), `[${timestamp}] ${message}`]);
+  };
 
   useEffect(() => {
+    addLog("App initialized");
     loadNetworks();
     loadRelays();
-    getVersion().then(setAppVersion).catch(() => {});
+    getVersion().then(v => {
+      setAppVersion(v);
+      addLog(`Version: ${v}`);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -103,12 +117,16 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
   const loadNetworks = async () => {
     try {
       setLoading(true);
+      addLog("Loading networks...");
       const data = await invoke<NetworkData[]>("get_networks");
+      addLog(`Loaded ${data.length} networks`);
       setNetworks(data);
       if (data.length > 0) {
         setSelectedNetwork(data[0]);
+        addLog(`Selected network: ${data[0].name}`);
       }
     } catch (err: any) {
+      addLog(`ERROR loading networks: ${err}`);
       setError(err.toString());
     } finally {
       setLoading(false);
@@ -117,16 +135,21 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
 
   const loadRelays = async () => {
     try {
+      addLog("Loading relays...");
       const data = await invoke<Relay[]>("get_relays");
+      addLog(`Loaded ${data.length} relays`);
       setRelays(data);
     } catch (err: any) {
+      addLog(`ERROR loading relays: ${err}`);
       console.error("Failed to load relays:", err);
     }
   };
 
   const loadExitNodes = async (networkId: string) => {
     try {
+      addLog(`Loading devices for network ${networkId}...`);
       const devices = await invoke<Device[]>("get_devices", { networkId });
+      addLog(`Loaded ${devices.length} devices`);
       // Filter to only show devices that can be exit nodes (routers, firewalls, servers)
       const exitNodeDevices = devices.filter(d =>
         d.is_exit_node && ["ROUTER", "FIREWALL", "SERVER"].includes(d.platform)
@@ -138,6 +161,7 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
         setSelectedExitNode({ id: "none", name: "None (mesh only)", type: "none" });
       }
     } catch (err: any) {
+      addLog(`ERROR loading exit nodes: ${err}`);
       console.error("Failed to load exit nodes:", err);
     }
   };
@@ -152,29 +176,38 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
   };
 
   const handleConnect = async () => {
-    if (!selectedNetwork) return;
+    if (!selectedNetwork) {
+      addLog("ERROR: No network selected");
+      return;
+    }
 
     setConnectionStatus("connecting");
     setError("");
+    addLog(`Connecting to network: ${selectedNetwork.name}`);
 
     try {
       // Auto-register this device
       const deviceName = getDeviceName();
+      addLog(`Auto-registering device: ${deviceName}`);
       const device = await invoke<Device>("auto_register_device", {
         networkId: selectedNetwork.id,
         deviceName,
       });
+      addLog(`Device registered: ${device.id} (${device.ip_address})`);
 
       setConnectedDevice(device);
 
       // Connect VPN
+      addLog(`Connecting VPN with device ${device.id}...`);
       await invoke("connect_vpn", {
         deviceId: device.id,
         networkId: selectedNetwork.id,
       });
 
+      addLog("VPN connected successfully");
       setConnectionStatus("connected");
     } catch (err: any) {
+      addLog(`ERROR connecting: ${err}`);
       setError(err.toString());
       setConnectionStatus("disconnected");
     }
@@ -207,13 +240,22 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
             <span className="text-primary">7</span>
           </div>
         </div>
-        <button
-          onClick={onLogout}
-          className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-          title="Sign out"
-        >
-          <LogOut className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setShowLogs(true)}
+            className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            title="View logs"
+          >
+            <Terminal className="w-5 h-5" />
+          </button>
+          <button
+            onClick={onLogout}
+            className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            title="Sign out"
+          >
+            <LogOut className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
       {/* Connection Status Card */}
@@ -547,6 +589,67 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
         <p>&copy; 2025 PLE7. All rights reserved.</p>
         {appVersion && <p className="mt-1">v{appVersion}</p>}
       </div>
+
+      {/* Logs Modal */}
+      <AnimatePresence>
+        {showLogs && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
+            onClick={() => setShowLogs(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-card border rounded-2xl w-full max-w-lg max-h-[80vh] flex flex-col"
+            >
+              <div className="flex items-center justify-between p-4 border-b">
+                <h3 className="font-semibold">Debug Logs</h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(logs.join('\n'));
+                    }}
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                    title="Copy logs"
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setShowLogs(false)}
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex-1 overflow-auto p-4">
+                <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap">
+                  {logs.length > 0 ? logs.join('\n') : 'No logs yet...'}
+                </pre>
+              </div>
+              <div className="p-4 border-t flex gap-2">
+                <button
+                  onClick={() => setLogs([])}
+                  className="flex-1 py-2 text-sm text-muted-foreground hover:text-foreground border rounded-lg hover:bg-muted transition-colors"
+                >
+                  Clear Logs
+                </button>
+                <button
+                  onClick={() => setShowLogs(false)}
+                  className="flex-1 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
+                >
+                  Close
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
