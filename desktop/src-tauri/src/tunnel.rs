@@ -113,7 +113,8 @@ impl TunnelManager {
             }
         };
 
-        // Phase 2: Connect WebSocket for real-time peer updates
+        // Phase 2: Try to connect WebSocket for real-time peer updates (optional)
+        // WebSocket is used for direct peer-to-peer connections. For relay-only mode, it's not required.
         let ws_config = WsConfig {
             base_url: api_base_url.to_string(),
             token: token.to_string(),
@@ -122,14 +123,12 @@ impl TunnelManager {
         };
 
         let ws_client = ManagedWsClient::new(ws_config);
-        let status_clone = self.status.clone();
 
-        // Start WebSocket with event handler
-        ws_client.start(Box::new(move |event| {
+        // Start WebSocket with event handler (non-blocking - continue if fails)
+        let ws_connected = match ws_client.start(Box::new(move |event| {
             match event {
-                WsEvent::PeerEndpointUpdate { device_id, public_key, endpoint } => {
+                WsEvent::PeerEndpointUpdate { public_key, endpoint, .. } => {
                     log::info!("Peer endpoint update: {} -> {}", public_key, endpoint);
-                    // The WireGuard tunnel will be updated via the ws_client's peer_endpoints
                 }
                 WsEvent::PeerOnline { device_id, .. } => {
                     log::info!("Peer came online: {}", device_id);
@@ -139,17 +138,31 @@ impl TunnelManager {
                 }
                 _ => {}
             }
-        })).await?;
+        })).await {
+            Ok(_) => {
+                log::info!("WebSocket connected for real-time updates");
+                true
+            }
+            Err(e) => {
+                log::warn!("WebSocket connection failed (will use relay-only mode): {}", e);
+                false
+            }
+        };
 
-        // Register our endpoint if we have one
-        if let Some(endpoint) = public_endpoint {
-            ws_client.register_endpoint(endpoint).await?;
+        // Only try to register/subscribe if WebSocket connected
+        if ws_connected {
+            if let Some(endpoint) = public_endpoint {
+                if let Err(e) = ws_client.register_endpoint(endpoint).await {
+                    log::warn!("Failed to register endpoint via WebSocket: {}", e);
+                }
+            }
+            if let Err(e) = ws_client.subscribe(network_id).await {
+                log::warn!("Failed to subscribe to network via WebSocket: {}", e);
+            }
+            *self.ws_client.lock().await = Some(ws_client);
+        } else {
+            log::info!("Continuing without WebSocket - relay-only mode");
         }
-
-        // Subscribe to network updates
-        ws_client.subscribe(network_id).await?;
-
-        *self.ws_client.lock().await = Some(ws_client);
 
         // Phase 3: Create and start WireGuard tunnel
         *self.status.write() = ConnectionStatus::Handshaking;
