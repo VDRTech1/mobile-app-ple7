@@ -82,6 +82,7 @@ impl TunnelManager {
         network_id: &str,
         api_base_url: &str,
         token: &str,
+        use_exit_node: bool,
     ) -> Result<(), String> {
         if self.is_running.load(Ordering::SeqCst) {
             log::warn!("[TUNNEL] Already connected, rejecting new connection");
@@ -201,6 +202,15 @@ impl TunnelManager {
         }
 
         tunnel.start().await?;
+
+        // If exit node is selected, route all traffic through VPN
+        if use_exit_node {
+            log::info!("[TUNNEL] Exit node enabled, setting default gateway through VPN");
+            if let Err(e) = tunnel.set_default_gateway().await {
+                log::warn!("[TUNNEL] Failed to set default gateway: {}", e);
+                // Don't fail the connection, just warn
+            }
+        }
 
         *self.wg_tunnel.lock().await = Some(tunnel);
         self.is_running.store(true, Ordering::SeqCst);
@@ -329,9 +339,12 @@ pub async fn connect_vpn(
     state: State<'_, AppState>,
     device_id: String,
     network_id: String,
+    exit_node_type: Option<String>,
+    exit_node_id: Option<String>,
 ) -> Result<(), String> {
     log::info!("========== VPN CONNECTION START ==========");
     log::info!("[STEP 1/6] connect_vpn command: device={}, network={}", device_id, network_id);
+    log::info!("[STEP 1/6] Exit node: type={:?}, id={:?}", exit_node_type, exit_node_id);
     log::info!("[STEP 1/6] API base URL: {}", state.api_client.base_url);
 
     // Get stored token
@@ -386,13 +399,16 @@ pub async fn connect_vpn(
     let tunnel_manager = state.tunnel_manager.lock().await;
     log::info!("[STEP 5/6] ✓ Lock acquired, starting connection...");
 
-    log::info!("[STEP 6/6] Calling tunnel_manager.connect()...");
+    // Determine if we should route all traffic through VPN (exit node)
+    let use_exit_node = exit_node_type.as_deref() == Some("relay") || exit_node_type.as_deref() == Some("device");
+    log::info!("[STEP 6/6] Calling tunnel_manager.connect() with exit_node={}...", use_exit_node);
     match tunnel_manager.connect(
         &config_response.config,
         &device_id,
         &network_id,
         &state.api_client.base_url,
         &token,
+        use_exit_node,
     ).await {
         Ok(()) => {
             log::info!("========== VPN CONNECTION SUCCESS ==========");

@@ -450,6 +450,12 @@ impl WgTunnel {
             peer.endpoint = Some(endpoint);
         }
     }
+
+    /// Set default gateway to route all traffic through VPN
+    pub async fn set_default_gateway(&self) -> Result<(), String> {
+        log::info!("Setting default gateway through VPN tunnel");
+        self.tun_device.set_default_gateway().await
+    }
 }
 
 /// Parse WireGuard config string into WgConfig

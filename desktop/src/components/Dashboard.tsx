@@ -198,10 +198,14 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
       setConnectedDevice(device);
 
       // Connect VPN
-      addLog(`Connecting VPN with device ${device.id}...`);
+      const exitNodeType = selectedExitNode?.type || "none";
+      const exitNodeId = selectedExitNode?.type !== "none" ? selectedExitNode?.id : null;
+      addLog(`Connecting VPN with device ${device.id}, exit: ${exitNodeType}${exitNodeId ? ` (${exitNodeId})` : ''}...`);
       await invoke("connect_vpn", {
         deviceId: device.id,
         networkId: selectedNetwork.id,
+        exitNodeType,
+        exitNodeId,
       });
 
       addLog("VPN connected successfully");
