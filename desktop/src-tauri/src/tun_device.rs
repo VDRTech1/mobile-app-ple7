@@ -229,11 +229,19 @@ mod macos {
     }
 
     impl MacOsTun {
+        /// Check if running with root privileges
+        fn is_root() -> bool {
+            unsafe { libc::geteuid() == 0 }
+        }
+
         pub async fn create(
             _name: &str,
             address: Ipv4Addr,
             netmask: Ipv4Addr,
         ) -> Result<Self, String> {
+            log::info!("macOS: Creating TUN device with address {}/{}", address, netmask);
+            log::info!("macOS: Running as root: {}", Self::is_root());
+
             let mut config = Configuration::default();
             config
                 .address(address)
@@ -242,12 +250,25 @@ mod macos {
                 .up();
 
             let device = tun::create(&config)
-                .map_err(|e| format!("Failed to create TUN device: {}", e))?;
+                .map_err(|e| {
+                    let error_str = e.to_string();
+                    if error_str.contains("Operation not permitted") || error_str.contains("os error 1") {
+                        log::error!("macOS TUN device creation failed due to insufficient permissions");
+                        log::error!("To use PLE7 VPN on macOS, the app needs elevated privileges.");
+                        log::error!("Please run the app with: sudo /Applications/PLE7\\ VPN.app/Contents/MacOS/PLE7\\ VPN");
+                        format!(
+                            "Permission denied: macOS requires administrator privileges to create VPN tunnels. \
+                            Please run the app with sudo or grant it administrator access in System Preferences > Security & Privacy."
+                        )
+                    } else {
+                        format!("Failed to create TUN device: {}", e)
+                    }
+                })?;
 
             let actual_name = device.tun_name()
                 .map_err(|e| format!("Failed to get device name: {}", e))?;
 
-            log::info!("macOS TUN device created: {}", actual_name);
+            log::info!("macOS TUN device created successfully: {}", actual_name);
 
             Ok(Self {
                 device: Arc::new(Mutex::new(device)),

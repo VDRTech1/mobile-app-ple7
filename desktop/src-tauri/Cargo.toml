@@ -1,6 +1,6 @@
 [package]
 name = "ple7-desktop"
-version = "0.3.11"
+version = "0.3.13"
 description = "PLE7 Desktop VPN Client"
 authors = ["PLE7"]
 edition = "2021"
@@ -68,6 +68,7 @@ windows = { version = "0.58", features = ["Win32_NetworkManagement_IpHelper", "W
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tun = { version = "0.7", features = ["async"] }
+libc = "0.2"
 
 [features]
 default = ["custom-protocol"]

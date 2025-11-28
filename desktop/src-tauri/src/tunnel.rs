@@ -84,36 +84,62 @@ impl TunnelManager {
         token: &str,
     ) -> Result<(), String> {
         if self.is_running.load(Ordering::SeqCst) {
+            log::warn!("[TUNNEL] Already connected, rejecting new connection");
             return Err("Already connected".to_string());
         }
 
-        log::info!("Starting VPN connection for device: {}", device_id);
+        log::info!("[TUNNEL] ========== TUNNEL CONNECT START ==========");
+        log::info!("[TUNNEL] Device: {}, Network: {}", device_id, network_id);
+        log::info!("[TUNNEL] API URL: {}", api_base_url);
         *self.status.write() = ConnectionStatus::Connecting;
 
         // Parse WireGuard configuration
-        let wg_config = parse_wg_config(config_str)?;
-        log::info!("Parsed WireGuard config with {} peers", wg_config.peers.len());
+        log::info!("[TUNNEL] Phase 0: Parsing WireGuard config...");
+        let wg_config = match parse_wg_config(config_str) {
+            Ok(c) => {
+                log::info!("[TUNNEL] ✓ WireGuard config parsed successfully");
+                c
+            }
+            Err(e) => {
+                log::error!("[TUNNEL] ✗ Failed to parse WireGuard config: {}", e);
+                return Err(e);
+            }
+        };
+        log::info!("[TUNNEL] Parsed WireGuard config with {} peers", wg_config.peers.len());
+        for (i, peer) in wg_config.peers.iter().enumerate() {
+            log::info!("[TUNNEL]   Peer {}: endpoint={:?}, allowed_ips={:?}",
+                i, peer.endpoint, peer.allowed_ips);
+        }
 
         // Store current session info
         *self.current_device_id.write() = Some(device_id.to_string());
         *self.current_network_id.write() = Some(network_id.to_string());
 
         // Phase 1: Discover our public endpoint via STUN
+        log::info!("[TUNNEL] Phase 1: STUN endpoint discovery...");
         *self.status.write() = ConnectionStatus::DiscoveringEndpoint;
         let stun_client = AsyncStunClient::new();
+        log::info!("[TUNNEL]   Contacting STUN servers...");
         let public_endpoint = match stun_client.discover_public_endpoint().await {
             Ok(result) => {
-                log::info!("STUN discovery successful: {}", result.public_addr);
+                log::info!("[TUNNEL] ✓ STUN discovery successful");
+                log::info!("[TUNNEL]   Public endpoint: {}", result.public_addr);
+                log::info!("[TUNNEL]   NAT type: {:?}", result.nat_type);
                 self.stats.write().public_endpoint = Some(result.public_addr.to_string());
                 Some(result.public_addr)
             }
             Err(e) => {
-                log::warn!("STUN discovery failed: {}. Will use relay.", e);
+                log::warn!("[TUNNEL] ⚠ STUN discovery failed: {}", e);
+                log::warn!("[TUNNEL]   Will use relay instead of direct P2P");
                 None
             }
         };
 
         // Phase 2: Connect WebSocket for real-time peer updates (optional - VPN works via relay without it)
+        log::info!("[TUNNEL] Phase 2: WebSocket connection (optional)...");
+        let ws_url = format!("{}/ws/mesh", api_base_url.replace("http://", "ws://").replace("https://", "wss://"));
+        log::info!("[TUNNEL]   WebSocket URL: {}", ws_url);
+
         let ws_config = WsConfig {
             base_url: api_base_url.to_string(),
             token: token.to_string(),
@@ -126,6 +152,7 @@ impl TunnelManager {
 
         // Try to start WebSocket - but don't fail if it doesn't work
         // The VPN will still function via relay, just without real-time P2P updates
+        log::info!("[TUNNEL]   Attempting WebSocket connection...");
         let ws_connected = match ws_client.start(Box::new(move |event| {
             match event {
                 WsEvent::PeerEndpointUpdate { device_id, public_key, endpoint } => {
@@ -303,27 +330,80 @@ pub async fn connect_vpn(
     device_id: String,
     network_id: String,
 ) -> Result<(), String> {
-    log::info!("connect_vpn command: device={}, network={}", device_id, network_id);
+    log::info!("========== VPN CONNECTION START ==========");
+    log::info!("[STEP 1/6] connect_vpn command: device={}, network={}", device_id, network_id);
+    log::info!("[STEP 1/6] API base URL: {}", state.api_client.base_url);
 
     // Get stored token
-    let token = crate::config::get_stored_token_internal(&app).await?;
+    log::info!("[STEP 2/6] Retrieving stored auth token...");
+    let token = match crate::config::get_stored_token_internal(&app).await {
+        Ok(t) => {
+            log::info!("[STEP 2/6] ✓ Token retrieved (length: {} chars)", t.len());
+            t
+        }
+        Err(e) => {
+            log::error!("[STEP 2/6] ✗ FAILED to get token: {}", e);
+            return Err(format!("Failed to get auth token: {}", e));
+        }
+    };
 
     // Get device configuration from API
-    let config_response = state.api_client.get_device_config(&token, &device_id).await?;
+    log::info!("[STEP 3/6] Fetching device config from API...");
+    let config_response = match state.api_client.get_device_config(&token, &device_id).await {
+        Ok(c) => {
+            log::info!("[STEP 3/6] ✓ Device config received");
+            log::info!("[STEP 3/6]   - has_private_key: {}", c.has_private_key);
+            log::info!("[STEP 3/6]   - config length: {} bytes", c.config.len());
+            c
+        }
+        Err(e) => {
+            log::error!("[STEP 3/6] ✗ FAILED to get device config: {}", e);
+            return Err(format!("Failed to get device config: {}", e));
+        }
+    };
 
     if !config_response.has_private_key {
+        log::error!("[STEP 3/6] ✗ Device config missing private key");
         return Err("Device configuration does not include private key. Please use a device with auto-generated keys.".to_string());
     }
 
+    // Log WireGuard config details (without secrets)
+    log::info!("[STEP 4/6] Parsing WireGuard config...");
+    for line in config_response.config.lines() {
+        let line = line.trim();
+        if line.starts_with("[") || line.starts_with("Address") || line.starts_with("DNS") ||
+           line.starts_with("Endpoint") || line.starts_with("AllowedIPs") || line.starts_with("PersistentKeepalive") {
+            log::info!("[STEP 4/6]   {}", line);
+        } else if line.starts_with("PublicKey") {
+            log::info!("[STEP 4/6]   PublicKey = [PRESENT]");
+        } else if line.starts_with("PrivateKey") {
+            log::info!("[STEP 4/6]   PrivateKey = [PRESENT]");
+        }
+    }
+
     // Connect using the tunnel manager
+    log::info!("[STEP 5/6] Acquiring tunnel manager lock...");
     let tunnel_manager = state.tunnel_manager.lock().await;
-    tunnel_manager.connect(
+    log::info!("[STEP 5/6] ✓ Lock acquired, starting connection...");
+
+    log::info!("[STEP 6/6] Calling tunnel_manager.connect()...");
+    match tunnel_manager.connect(
         &config_response.config,
         &device_id,
         &network_id,
         &state.api_client.base_url,
         &token,
-    ).await
+    ).await {
+        Ok(()) => {
+            log::info!("========== VPN CONNECTION SUCCESS ==========");
+            Ok(())
+        }
+        Err(e) => {
+            log::error!("[STEP 6/6] ✗ tunnel_manager.connect() FAILED: {}", e);
+            log::error!("========== VPN CONNECTION FAILED ==========");
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Allow outgoing network connections -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Allow incoming network connections -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- Allow packet tunnel provider (VPN) - requires Apple Developer approval -->
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider</string>
+    </array>
+
+    <!-- Allow system extension (for TUN device) - requires Apple Developer approval -->
+    <key>com.apple.developer.system-extension.install</key>
+    <true/>
+
+    <!-- App Sandbox must be disabled for TUN access -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Hardened Runtime exceptions -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
