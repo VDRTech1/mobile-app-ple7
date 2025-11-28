@@ -400,14 +400,45 @@ mod windows {
     }
 
     impl WindowsTun {
+        /// Load wintun.dll from multiple possible locations
+        fn load_wintun() -> Result<wintun::Wintun, String> {
+            // Try to get the executable directory
+            if let Ok(exe_path) = std::env::current_exe() {
+                if let Some(exe_dir) = exe_path.parent() {
+                    // Try resources directory (where Tauri puts bundled resources)
+                    let resources_dll = exe_dir.join("wintun.dll");
+                    log::info!("Looking for wintun.dll at: {:?}", resources_dll);
+                    if resources_dll.exists() {
+                        log::info!("Found wintun.dll in resources directory");
+                        return unsafe { wintun::load_from_path(&resources_dll) }
+                            .map_err(|e| format!("Failed to load wintun.dll from resources: {}", e));
+                    }
+
+                    // Try one level up (in case exe is in a subdirectory)
+                    if let Some(parent_dir) = exe_dir.parent() {
+                        let parent_dll = parent_dir.join("wintun.dll");
+                        if parent_dll.exists() {
+                            log::info!("Found wintun.dll in parent directory");
+                            return unsafe { wintun::load_from_path(&parent_dll) }
+                                .map_err(|e| format!("Failed to load wintun.dll from parent: {}", e));
+                        }
+                    }
+                }
+            }
+
+            // Fall back to default loading (current directory, system directories)
+            log::info!("Trying default wintun.dll load locations");
+            unsafe { wintun::load() }
+                .map_err(|e| format!("Failed to load wintun.dll: {}. Make sure wintun.dll is installed.", e))
+        }
+
         pub async fn create(
             name: &str,
             address: Ipv4Addr,
             netmask: Ipv4Addr,
         ) -> Result<Self, String> {
-            // Load wintun.dll
-            let wintun = unsafe { wintun::load() }
-                .map_err(|e| format!("Failed to load wintun.dll: {}. Make sure wintun.dll is in the same directory as the executable.", e))?;
+            // Find wintun.dll - check multiple locations
+            let wintun = Self::load_wintun()?;
 
             // Create or open adapter (returns Arc<Adapter>)
             let adapter = match Adapter::create(&wintun, WINTUN_POOL, name, None) {

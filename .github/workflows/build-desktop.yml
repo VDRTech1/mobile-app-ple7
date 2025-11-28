@@ -56,6 +56,10 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip
           Expand-Archive wintun.zip -DestinationPath wintun
+          # Copy to resources folder so it gets bundled with the app
+          New-Item -ItemType Directory -Force -Path "desktop/src-tauri/resources"
+          Copy-Item "wintun/wintun/bin/amd64/wintun.dll" -Destination "desktop/src-tauri/resources/"
+          # Also copy to src-tauri for local build compatibility
           Copy-Item "wintun/wintun/bin/amd64/wintun.dll" -Destination "desktop/src-tauri/"
 
       - name: Install frontend dependencies
