@@ -45,7 +45,8 @@ export default function Login({ onLogin }: LoginProps) {
 
   const handleGoogleLogin = async () => {
     try {
-      await open("https://ple7.com/login?oauth=google");
+      // Use desktop OAuth endpoint that redirects back via ple7:// deep link
+      await open("https://ple7.com/api/auth/google/desktop");
     } catch (err) {
       console.error("Failed to open browser:", err);
     }

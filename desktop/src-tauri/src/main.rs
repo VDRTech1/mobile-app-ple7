@@ -12,7 +12,7 @@ mod websocket;
 use std::sync::Arc;
 use std::io::Write;
 use std::fs::OpenOptions;
-use tauri::Manager;
+use tauri::{Manager, Emitter};
 use tokio::sync::Mutex;
 use tunnel::{TunnelManager, AppState};
 
@@ -74,6 +74,17 @@ fn main() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Handle deep link on Windows/Linux when app is already running
+            log_to_file(&format!("Single instance args: {:?}", args));
+            if let Some(url) = args.get(1) {
+                if url.starts_with("ple7://") {
+                    log_to_file(&format!("Deep link received: {}", url));
+                    let _ = app.emit("deep-link", url.clone());
+                }
+            }
+        }))
         .setup(|app| {
             log_to_file("Setup callback started");
 

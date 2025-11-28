@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import Login from "./components/Login";
 import Dashboard from "./components/Dashboard";
 
@@ -13,8 +15,41 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Handle deep link URL (OAuth callback)
+  const handleDeepLink = async (url: string) => {
+    console.log("Deep link received:", url);
+    try {
+      const urlObj = new URL(url);
+      const token = urlObj.searchParams.get("token");
+      if (token) {
+        // Store the token
+        await invoke("store_token", { token });
+        // Verify and get user data
+        const userData = await invoke<User>("verify_token", { token });
+        setUser(userData);
+      }
+    } catch (error) {
+      console.error("Error handling deep link:", error);
+    }
+  };
+
   useEffect(() => {
     checkAuth();
+
+    // Listen for deep links on macOS (while app is running)
+    const unsubscribeDeepLink = onOpenUrl((urls) => {
+      urls.forEach((url) => handleDeepLink(url));
+    });
+
+    // Listen for deep-link events from single-instance plugin (Windows/Linux)
+    const unsubscribeEvent = listen<string>("deep-link", (event) => {
+      handleDeepLink(event.payload);
+    });
+
+    return () => {
+      unsubscribeDeepLink.then((fn) => fn());
+      unsubscribeEvent.then((fn) => fn());
+    };
   }, []);
 
   const checkAuth = async () => {
