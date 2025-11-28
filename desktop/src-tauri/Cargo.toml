@@ -1,6 +1,6 @@
 [package]
 name = "ple7-desktop"
-version = "0.3.32"
+version = "0.3.33"
 description = "PLE7 Desktop VPN Client"
 authors = ["PLE7"]
 edition = "2021"
