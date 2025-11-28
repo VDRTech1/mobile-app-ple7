@@ -133,6 +133,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             api::login,
+            api::verify_token,
             api::get_networks,
             api::get_devices,
             api::get_device_config,
