@@ -98,6 +98,8 @@ fn main() {
             api::get_networks,
             api::get_devices,
             api::get_device_config,
+            api::get_relays,
+            api::auto_register_device,
             config::store_token,
             config::get_stored_token,
             config::clear_stored_token,

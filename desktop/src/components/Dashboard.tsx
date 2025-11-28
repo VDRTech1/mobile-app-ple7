@@ -4,7 +4,6 @@ import { getVersion } from "@tauri-apps/api/app";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Network,
-  Laptop,
   Power,
   PowerOff,
   LogOut,
@@ -16,6 +15,8 @@ import {
   Wifi,
   WifiOff,
   RefreshCw,
+  Router,
+  Server,
 } from "lucide-react";
 import PleiadesLogo from "./PleiadesLogo";
 
@@ -42,6 +43,23 @@ interface Device {
   platform: string;
 }
 
+interface Relay {
+  id: string;
+  name: string;
+  location: string;
+  country_code: string;
+  public_endpoint: string;
+  status: string;
+}
+
+interface ExitNodeOption {
+  id: string;
+  name: string;
+  type: "none" | "relay" | "device";
+  countryCode?: string;
+  icon?: string;
+}
+
 interface DashboardProps {
   user: User;
   onLogout: () => void;
@@ -49,26 +67,36 @@ interface DashboardProps {
 
 type ConnectionStatus = "disconnected" | "connecting" | "connected" | "disconnecting";
 
+// Country code to flag emoji
+const countryToFlag = (code: string): string => {
+  if (!code || code.length !== 2) return "🌐";
+  const codePoints = code.toUpperCase().split("").map(c => 127397 + c.charCodeAt(0));
+  return String.fromCodePoint(...codePoints);
+};
+
 export default function Dashboard({ user, onLogout }: DashboardProps) {
   const [networks, setNetworks] = useState<NetworkData[]>([]);
   const [selectedNetwork, setSelectedNetwork] = useState<NetworkData | null>(null);
-  const [devices, setDevices] = useState<Device[]>([]);
-  const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
+  const [relays, setRelays] = useState<Relay[]>([]);
+  const [exitNodes, setExitNodes] = useState<Device[]>([]);
+  const [selectedExitNode, setSelectedExitNode] = useState<ExitNodeOption | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("disconnected");
   const [showNetworkSelect, setShowNetworkSelect] = useState(false);
-  const [showDeviceSelect, setShowDeviceSelect] = useState(false);
+  const [showExitNodeSelect, setShowExitNodeSelect] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [appVersion, setAppVersion] = useState("");
+  const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
 
   useEffect(() => {
     loadNetworks();
+    loadRelays();
     getVersion().then(setAppVersion).catch(() => {});
   }, []);
 
   useEffect(() => {
     if (selectedNetwork) {
-      loadDevices(selectedNetwork.id);
+      loadExitNodes(selectedNetwork.id);
     }
   }, [selectedNetwork]);
 
@@ -87,27 +115,64 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
     }
   };
 
-  const loadDevices = async (networkId: string) => {
+  const loadRelays = async () => {
     try {
-      const data = await invoke<Device[]>("get_devices", { networkId });
-      setDevices(data);
-      if (data.length > 0 && !selectedDevice) {
-        setSelectedDevice(data[0]);
-      }
+      const data = await invoke<Relay[]>("get_relays");
+      setRelays(data);
     } catch (err: any) {
-      setError(err.toString());
+      console.error("Failed to load relays:", err);
     }
   };
 
+  const loadExitNodes = async (networkId: string) => {
+    try {
+      const devices = await invoke<Device[]>("get_devices", { networkId });
+      // Filter to only show devices that can be exit nodes (routers, firewalls, servers)
+      const exitNodeDevices = devices.filter(d =>
+        d.is_exit_node && ["ROUTER", "FIREWALL", "SERVER"].includes(d.platform)
+      );
+      setExitNodes(exitNodeDevices);
+
+      // Set default to "None" if no selection
+      if (!selectedExitNode) {
+        setSelectedExitNode({ id: "none", name: "None (mesh only)", type: "none" });
+      }
+    } catch (err: any) {
+      console.error("Failed to load exit nodes:", err);
+    }
+  };
+
+  const getDeviceName = (): string => {
+    // Try to get a meaningful device name
+    const platform = navigator.platform || "Unknown";
+    if (platform.includes("Win")) return "Windows PC";
+    if (platform.includes("Mac")) return "Mac";
+    if (platform.includes("Linux")) return "Linux PC";
+    return "Desktop";
+  };
+
   const handleConnect = async () => {
-    if (!selectedDevice || !selectedNetwork) return;
+    if (!selectedNetwork) return;
 
     setConnectionStatus("connecting");
+    setError("");
+
     try {
-      await invoke("connect_vpn", {
-        deviceId: selectedDevice.id,
-        networkId: selectedNetwork.id
+      // Auto-register this device
+      const deviceName = getDeviceName();
+      const device = await invoke<Device>("auto_register_device", {
+        networkId: selectedNetwork.id,
+        deviceName,
       });
+
+      setConnectedDevice(device);
+
+      // Connect VPN
+      await invoke("connect_vpn", {
+        deviceId: device.id,
+        networkId: selectedNetwork.id,
+      });
+
       setConnectionStatus("connected");
     } catch (err: any) {
       setError(err.toString());
@@ -120,6 +185,7 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
     try {
       await invoke("disconnect_vpn");
       setConnectionStatus("disconnected");
+      setConnectedDevice(null);
     } catch (err: any) {
       setError(err.toString());
       setConnectionStatus("connected");
@@ -128,6 +194,22 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
 
   const isConnected = connectionStatus === "connected";
   const isConnecting = connectionStatus === "connecting" || connectionStatus === "disconnecting";
+
+  // Build exit node options list
+  const exitNodeOptions: ExitNodeOption[] = [
+    { id: "none", name: "None (mesh only)", type: "none" },
+    ...relays.map(r => ({
+      id: r.id,
+      name: r.location,
+      type: "relay" as const,
+      countryCode: r.country_code,
+    })),
+    ...exitNodes.map(d => ({
+      id: d.id,
+      name: d.name,
+      type: "device" as const,
+    })),
+  ];
 
   return (
     <div className="min-h-screen p-4">
@@ -181,9 +263,9 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
                   ? "Disconnecting..."
                   : "Disconnected"}
               </p>
-              {isConnected && selectedDevice && (
+              {isConnected && connectedDevice && (
                 <p className="text-sm text-muted-foreground">
-                  {selectedDevice.ip_address}
+                  {connectedDevice.ip_address}
                 </p>
               )}
             </div>
@@ -191,7 +273,7 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
 
           <button
             onClick={isConnected ? handleDisconnect : handleConnect}
-            disabled={isConnecting || !selectedDevice}
+            disabled={isConnecting || !selectedNetwork}
             className={`w-16 h-16 rounded-full flex items-center justify-center transition-all ${
               isConnected
                 ? "bg-green-500 hover:bg-green-600"
@@ -241,7 +323,8 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
         <div className="relative">
           <button
             onClick={() => setShowNetworkSelect(!showNetworkSelect)}
-            className="w-full flex items-center justify-between p-3 bg-card border rounded-xl hover:bg-muted/50 transition-colors"
+            disabled={isConnected}
+            className="w-full flex items-center justify-between p-3 bg-card border rounded-xl hover:bg-muted/50 transition-colors disabled:opacity-50"
           >
             <div className="flex items-center gap-3">
               <Network className="w-5 h-5 text-primary" />
@@ -263,7 +346,6 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
                     key={network.id}
                     onClick={() => {
                       setSelectedNetwork(network);
-                      setSelectedDevice(null);
                       setShowNetworkSelect(false);
                     }}
                     className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
@@ -280,7 +362,7 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
         </div>
       </motion.div>
 
-      {/* Device Selector */}
+      {/* Exit Node Selector */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -288,51 +370,121 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
         className="mb-4"
       >
         <label className="block text-sm font-medium text-muted-foreground mb-2">
-          Device
+          Exit Node
         </label>
         <div className="relative">
           <button
-            onClick={() => setShowDeviceSelect(!showDeviceSelect)}
-            className="w-full flex items-center justify-between p-3 bg-card border rounded-xl hover:bg-muted/50 transition-colors"
+            onClick={() => setShowExitNodeSelect(!showExitNodeSelect)}
+            disabled={isConnected}
+            className="w-full flex items-center justify-between p-3 bg-card border rounded-xl hover:bg-muted/50 transition-colors disabled:opacity-50"
           >
             <div className="flex items-center gap-3">
-              <Laptop className="w-5 h-5 text-primary" />
-              <div className="text-left">
-                <span>{selectedDevice?.name || "Select device"}</span>
-                {selectedDevice && (
-                  <p className="text-xs text-muted-foreground">{selectedDevice.ip_address}</p>
-                )}
-              </div>
+              {selectedExitNode?.type === "relay" ? (
+                <span className="text-lg">{countryToFlag(selectedExitNode.countryCode || "")}</span>
+              ) : selectedExitNode?.type === "device" ? (
+                <Router className="w-5 h-5 text-primary" />
+              ) : (
+                <Globe className="w-5 h-5 text-muted-foreground" />
+              )}
+              <span>{selectedExitNode?.name || "Select exit node"}</span>
             </div>
-            <ChevronDown className={`w-4 h-4 transition-transform ${showDeviceSelect ? "rotate-180" : ""}`} />
+            <ChevronDown className={`w-4 h-4 transition-transform ${showExitNodeSelect ? "rotate-180" : ""}`} />
           </button>
 
           <AnimatePresence>
-            {showDeviceSelect && (
+            {showExitNodeSelect && (
               <motion.div
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -10 }}
-                className="absolute top-full left-0 right-0 mt-1 bg-card border rounded-xl shadow-lg overflow-hidden z-10 max-h-48 overflow-y-auto"
+                className="absolute top-full left-0 right-0 mt-1 bg-card border rounded-xl shadow-lg overflow-hidden z-10 max-h-64 overflow-y-auto"
               >
-                {devices.map((device) => (
-                  <button
-                    key={device.id}
-                    onClick={() => {
-                      setSelectedDevice(device);
-                      setShowDeviceSelect(false);
-                    }}
-                    className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
-                  >
-                    <div className="text-left">
-                      <span>{device.name}</span>
-                      <p className="text-xs text-muted-foreground">{device.ip_address}</p>
+                {/* None option */}
+                <button
+                  onClick={() => {
+                    setSelectedExitNode({ id: "none", name: "None (mesh only)", type: "none" });
+                    setShowExitNodeSelect(false);
+                  }}
+                  className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <Globe className="w-5 h-5 text-muted-foreground" />
+                    <span>None (mesh only)</span>
+                  </div>
+                  {selectedExitNode?.id === "none" && (
+                    <Check className="w-4 h-4 text-primary" />
+                  )}
+                </button>
+
+                {/* Relays section */}
+                {relays.length > 0 && (
+                  <>
+                    <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/30">
+                      PLE7 Relays
                     </div>
-                    {selectedDevice?.id === device.id && (
-                      <Check className="w-4 h-4 text-primary" />
-                    )}
-                  </button>
-                ))}
+                    {relays.map((relay) => (
+                      <button
+                        key={relay.id}
+                        onClick={() => {
+                          setSelectedExitNode({
+                            id: relay.id,
+                            name: relay.location,
+                            type: "relay",
+                            countryCode: relay.country_code,
+                          });
+                          setShowExitNodeSelect(false);
+                        }}
+                        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className="text-lg">{countryToFlag(relay.country_code)}</span>
+                          <span>{relay.location}</span>
+                        </div>
+                        {selectedExitNode?.id === relay.id && (
+                          <Check className="w-4 h-4 text-primary" />
+                        )}
+                      </button>
+                    ))}
+                  </>
+                )}
+
+                {/* User devices section */}
+                {exitNodes.length > 0 && (
+                  <>
+                    <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/30">
+                      Your Devices
+                    </div>
+                    {exitNodes.map((device) => (
+                      <button
+                        key={device.id}
+                        onClick={() => {
+                          setSelectedExitNode({
+                            id: device.id,
+                            name: device.name,
+                            type: "device",
+                          });
+                          setShowExitNodeSelect(false);
+                        }}
+                        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          {device.platform === "ROUTER" ? (
+                            <Router className="w-5 h-5 text-primary" />
+                          ) : (
+                            <Server className="w-5 h-5 text-primary" />
+                          )}
+                          <div className="text-left">
+                            <span>{device.name}</span>
+                            <p className="text-xs text-muted-foreground">{device.ip_address}</p>
+                          </div>
+                        </div>
+                        {selectedExitNode?.id === device.id && (
+                          <Check className="w-4 h-4 text-primary" />
+                        )}
+                      </button>
+                    ))}
+                  </>
+                )}
               </motion.div>
             )}
           </AnimatePresence>
@@ -344,7 +496,10 @@ export default function Dashboard({ user, onLogout }: DashboardProps) {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ delay: 0.3 }}
-        onClick={loadNetworks}
+        onClick={() => {
+          loadNetworks();
+          loadRelays();
+        }}
         disabled={loading}
         className="w-full flex items-center justify-center gap-2 p-3 text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-xl transition-colors"
       >

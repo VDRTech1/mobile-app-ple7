@@ -60,11 +60,30 @@ pub struct Device {
     pub platform: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConfig {
     pub config: String,
     #[serde(rename = "hasPrivateKey")]
     pub has_private_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Relay {
+    pub id: String,
+    pub name: String,
+    pub location: String,
+    pub country_code: String,
+    pub public_endpoint: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExitNodeOption {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub node_type: String, // "none", "relay", "device"
+    pub country_code: Option<String>,
 }
 
 impl ApiClient {
@@ -190,6 +209,58 @@ impl ApiClient {
             .await
             .map_err(|e| format!("Failed to parse response: {}", e))
     }
+
+    pub async fn get_relays(&self, token: &str) -> Result<Vec<Relay>, String> {
+        let response = self
+            .client
+            .get(format!("{}/api/mesh/relays", self.base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err("Failed to fetch relays".to_string());
+        }
+
+        response
+            .json::<Vec<Relay>>()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))
+    }
+
+    pub async fn auto_register_device(
+        &self,
+        token: &str,
+        network_id: &str,
+        device_name: &str,
+        platform: &str,
+    ) -> Result<Device, String> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/mesh/networks/{}/auto-register",
+                self.base_url, network_id
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&serde_json::json!({
+                "deviceName": device_name,
+                "platform": platform
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {}", e))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("Failed to register device: {}", error_text));
+        }
+
+        response
+            .json::<Device>()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))
+    }
 }
 
 // Tauri commands
@@ -234,4 +305,36 @@ pub async fn get_device_config(
 ) -> Result<DeviceConfig, String> {
     let token = crate::config::get_stored_token_internal(&app).await?;
     state.api_client.get_device_config(&token, &device_id).await
+}
+
+#[tauri::command]
+pub async fn get_relays(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<Relay>, String> {
+    let token = crate::config::get_stored_token_internal(&app).await?;
+    state.api_client.get_relays(&token).await
+}
+
+#[tauri::command]
+pub async fn auto_register_device(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    network_id: String,
+    device_name: String,
+) -> Result<Device, String> {
+    let token = crate::config::get_stored_token_internal(&app).await?;
+
+    // Detect platform
+    let platform = if cfg!(target_os = "windows") {
+        "DESKTOP"
+    } else if cfg!(target_os = "macos") {
+        "DESKTOP"
+    } else if cfg!(target_os = "linux") {
+        "DESKTOP"
+    } else {
+        "UNKNOWN"
+    };
+
+    state.api_client.auto_register_device(&token, &network_id, &device_name, platform).await
 }
