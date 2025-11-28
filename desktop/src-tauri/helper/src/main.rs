@@ -4,13 +4,15 @@
 //! It listens on a Unix socket and accepts commands from the main app.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::fs;
 
 use serde::{Deserialize, Serialize};
 
@@ -466,7 +468,3 @@ fn restore_default_gateway(state: &Arc<Mutex<HelperState>>) -> HelperResponse {
         data: None,
     }
 }
-
-// Permissions helper for Unix
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::AsRawFd;
