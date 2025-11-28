@@ -232,79 +232,89 @@ fn handle_command(cmd: HelperCommand, state: &Arc<Mutex<HelperState>>) -> Helper
 
 // macOS-specific utun creation using system socket
 fn create_utun() -> Result<(i32, String), String> {
-    use std::os::fd::RawFd;
+    // Constants for macOS utun (from sys/kern_control.h and net/if_utun.h)
+    const PF_SYSTEM: libc::c_int = 32;
+    const SOCK_DGRAM: libc::c_int = 2;
+    const SYSPROTO_CONTROL: libc::c_int = 2;
+    const AF_SYS_CONTROL: libc::c_uchar = 2;
+    const UTUN_CONTROL_NAME: &str = "com.apple.net.utun_control";
 
-    // Constants for macOS utun
-    const PF_SYSTEM: i32 = 32;
-    const SOCK_DGRAM: i32 = 2;
-    const SYSPROTO_CONTROL: i32 = 2;
-    const AF_SYS_CONTROL: u16 = 2;
-    const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
-
+    // ctl_info structure (100 bytes: 4 + 96)
     #[repr(C)]
-    struct ctl_info {
+    #[derive(Default)]
+    struct CtlInfo {
         ctl_id: u32,
-        ctl_name: [u8; 96],
+        ctl_name: [libc::c_char; 96],
     }
 
+    // sockaddr_ctl structure
     #[repr(C)]
-    struct sockaddr_ctl {
-        sc_len: u8,
-        sc_family: u8,
+    struct SockaddrCtl {
+        sc_len: libc::c_uchar,
+        sc_family: libc::c_uchar,
         ss_sysaddr: u16,
         sc_id: u32,
         sc_unit: u32,
         sc_reserved: [u32; 5],
     }
 
-    // Define ioctl for CTLIOCGINFO using nix
-    nix::ioctl_readwrite!(ctliocginfo, b'N', 3, ctl_info);
+    // CTLIOCGINFO = _IOWR('N', 3, struct ctl_info)
+    // Manually compute for macOS: IOC_INOUT | (100 << 16) | ('N' << 8) | 3
+    // = 0xC0000000 | (0x64 << 16) | (0x4E << 8) | 3 = 0xC0644E03
+    #[allow(non_upper_case_globals)]
+    const CTLIOCGINFO: libc::c_ulong = 0xC0644E03;
 
     unsafe {
-        // Create socket
-        let fd: RawFd = libc::socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
+        // Create PF_SYSTEM socket
+        let fd = libc::socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
         if fd < 0 {
-            return Err(format!("Failed to create socket: {}", std::io::Error::last_os_error()));
+            return Err(format!("Failed to create socket: errno {}", *libc::__error()));
         }
 
-        // Get control ID for utun
-        let mut info = ctl_info {
-            ctl_id: 0,
-            ctl_name: [0; 96],
-        };
-        info.ctl_name[..UTUN_CONTROL_NAME.len()].copy_from_slice(UTUN_CONTROL_NAME);
+        // Prepare ctl_info with utun control name
+        let mut info: CtlInfo = Default::default();
+        for (i, c) in UTUN_CONTROL_NAME.bytes().enumerate() {
+            if i < 96 {
+                info.ctl_name[i] = c as libc::c_char;
+            }
+        }
 
-        if let Err(e) = ctliocginfo(fd, &mut info) {
+        // Get the control ID
+        let ret = libc::ioctl(fd, CTLIOCGINFO, &mut info as *mut CtlInfo);
+        if ret < 0 {
+            let errno = *libc::__error();
             libc::close(fd);
-            return Err(format!("Failed to get control info: {}", e));
+            return Err(format!("Failed to get utun control ID: errno {}", errno));
         }
 
-        // Try to find an available utun unit (start from 0)
-        for unit in 0..256u32 {
-            let addr = sockaddr_ctl {
-                sc_len: std::mem::size_of::<sockaddr_ctl>() as u8,
-                sc_family: AF_SYS_CONTROL as u8,
+        log::info!("Got utun control ID: {}", info.ctl_id);
+
+        // Try to find an available utun unit
+        for unit in 0u32..256 {
+            let addr = SockaddrCtl {
+                sc_len: std::mem::size_of::<SockaddrCtl>() as libc::c_uchar,
+                sc_family: AF_SYS_CONTROL,
                 ss_sysaddr: 0,
                 sc_id: info.ctl_id,
-                sc_unit: unit + 1, // utun0 = unit 1, utun1 = unit 2, etc.
+                sc_unit: unit + 1, // utun0 = unit 1
                 sc_reserved: [0; 5],
             };
 
-            let result = libc::connect(
+            let ret = libc::connect(
                 fd,
-                &addr as *const sockaddr_ctl as *const libc::sockaddr,
-                std::mem::size_of::<sockaddr_ctl>() as libc::socklen_t,
+                &addr as *const SockaddrCtl as *const libc::sockaddr,
+                std::mem::size_of::<SockaddrCtl>() as libc::socklen_t,
             );
 
-            if result == 0 {
+            if ret == 0 {
                 let name = format!("utun{}", unit);
-                log::info!("Created utun device: {} (fd: {})", name, fd);
+                log::info!("Created {}", name);
                 return Ok((fd, name));
             }
         }
 
         libc::close(fd);
-        Err("Failed to find available utun unit".to_string())
+        Err("No available utun unit".to_string())
     }
 }
 
