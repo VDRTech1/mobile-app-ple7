@@ -13,12 +13,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use libc;
-
 use serde::{Deserialize, Serialize};
 
 const SOCKET_PATH: &str = "/var/run/ple7-helper.sock";
-const TUN_MTU: u16 = 1420;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command")]
@@ -73,9 +70,8 @@ struct TunInfo {
     address: Ipv4Addr,
     #[allow(dead_code)]
     netmask: Ipv4Addr,
-    // Store the actual device to keep it alive
-    #[allow(dead_code)]
-    device: tun::Device,
+    // File descriptor for the utun device
+    fd: i32,
 }
 
 impl HelperState {
@@ -234,8 +230,99 @@ fn handle_command(cmd: HelperCommand, state: &Arc<Mutex<HelperState>>) -> Helper
     }
 }
 
-fn create_tun(state: &Arc<Mutex<HelperState>>, name: &str, address: &str, netmask: &str) -> HelperResponse {
-    log::info!("Creating TUN device: {} with address {}/{}", name, address, netmask);
+// macOS-specific utun creation using system socket
+fn create_utun() -> Result<(i32, String), String> {
+    use std::os::raw::c_int;
+
+    // Constants for macOS utun
+    const PF_SYSTEM: c_int = 32;
+    const SOCK_DGRAM: c_int = 2;
+    const SYSPROTO_CONTROL: c_int = 2;
+    const AF_SYS_CONTROL: u16 = 2;
+    const CTLIOCGINFO: libc::c_ulong = 0xc0644e03;
+    const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
+
+    #[repr(C)]
+    struct ctl_info {
+        ctl_id: u32,
+        ctl_name: [u8; 96],
+    }
+
+    #[repr(C)]
+    struct sockaddr_ctl {
+        sc_len: u8,
+        sc_family: u8,
+        ss_sysaddr: u16,
+        sc_id: u32,
+        sc_unit: u32,
+        sc_reserved: [u32; 5],
+    }
+
+    unsafe {
+        // Create socket
+        let fd = libc::socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
+        if fd < 0 {
+            return Err(format!("Failed to create socket: {}", std::io::Error::last_os_error()));
+        }
+
+        // Get control ID for utun
+        let mut info = ctl_info {
+            ctl_id: 0,
+            ctl_name: [0; 96],
+        };
+        info.ctl_name[..UTUN_CONTROL_NAME.len()].copy_from_slice(UTUN_CONTROL_NAME);
+
+        if libc::ioctl(fd, CTLIOCGINFO, &mut info) < 0 {
+            libc::close(fd);
+            return Err(format!("Failed to get control info: {}", std::io::Error::last_os_error()));
+        }
+
+        // Try to find an available utun unit (start from 0)
+        for unit in 0..256u32 {
+            let addr = sockaddr_ctl {
+                sc_len: std::mem::size_of::<sockaddr_ctl>() as u8,
+                sc_family: AF_SYS_CONTROL as u8,
+                ss_sysaddr: 0,
+                sc_id: info.ctl_id,
+                sc_unit: unit + 1, // utun0 = unit 1, utun1 = unit 2, etc.
+                sc_reserved: [0; 5],
+            };
+
+            let result = libc::connect(
+                fd,
+                &addr as *const sockaddr_ctl as *const libc::sockaddr,
+                std::mem::size_of::<sockaddr_ctl>() as libc::socklen_t,
+            );
+
+            if result == 0 {
+                let name = format!("utun{}", unit);
+                log::info!("Created utun device: {} (fd: {})", name, fd);
+                return Ok((fd, name));
+            }
+        }
+
+        libc::close(fd);
+        Err("Failed to find available utun unit".to_string())
+    }
+}
+
+fn configure_utun(name: &str, address: &str, netmask: &str) -> Result<(), String> {
+    // Use ifconfig to configure the interface
+    let output = Command::new("ifconfig")
+        .args([name, address, address, "netmask", netmask, "up"])
+        .output()
+        .map_err(|e| format!("Failed to execute ifconfig: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to configure interface: {}", stderr));
+    }
+
+    Ok(())
+}
+
+fn create_tun(state: &Arc<Mutex<HelperState>>, _name: &str, address: &str, netmask: &str) -> HelperResponse {
+    log::info!("Creating TUN device with address {}/{}", address, netmask);
 
     let addr: Ipv4Addr = match address.parse() {
         Ok(a) => a,
@@ -255,46 +342,45 @@ fn create_tun(state: &Arc<Mutex<HelperState>>, name: &str, address: &str, netmas
         },
     };
 
-    // Create TUN device using tun crate
-    let mut config = tun::Configuration::default();
-    config
-        .address(addr)
-        .netmask(mask)
-        .mtu(TUN_MTU as i32)
-        .up();
-
-    match tun::create(&config) {
-        Ok(device) => {
-            use tun::AbstractDevice;
-            let actual_name = device.tun_name().unwrap_or_else(|_| name.to_string());
-
-            log::info!("TUN device created: {}", actual_name);
-
-            // Store the device to keep it alive
-            let mut state = state.lock().unwrap();
-            state.tun_devices.insert(actual_name.clone(), TunInfo {
-                address: addr,
-                netmask: mask,
-                device,
-            });
-
-            HelperResponse {
-                success: true,
-                message: format!("TUN device {} created", actual_name),
-                data: Some(serde_json::json!({
-                    "name": actual_name,
-                    "address": address,
-                })),
-            }
-        }
+    // Create utun device
+    let (fd, actual_name) = match create_utun() {
+        Ok((fd, name)) => (fd, name),
         Err(e) => {
-            log::error!("Failed to create TUN: {}", e);
-            HelperResponse {
+            log::error!("Failed to create utun: {}", e);
+            return HelperResponse {
                 success: false,
                 message: format!("Failed to create TUN device: {}", e),
                 data: None,
-            }
+            };
         }
+    };
+
+    // Configure the interface
+    if let Err(e) = configure_utun(&actual_name, address, netmask) {
+        log::error!("Failed to configure utun: {}", e);
+        unsafe { libc::close(fd); }
+        return HelperResponse {
+            success: false,
+            message: format!("Failed to configure TUN device: {}", e),
+            data: None,
+        };
+    }
+
+    // Store device info
+    let mut state = state.lock().unwrap();
+    state.tun_devices.insert(actual_name.clone(), TunInfo {
+        address: addr,
+        netmask: mask,
+        fd,
+    });
+
+    HelperResponse {
+        success: true,
+        message: format!("TUN device {} created", actual_name),
+        data: Some(serde_json::json!({
+            "name": actual_name,
+            "address": address,
+        })),
     }
 }
 
@@ -302,8 +388,11 @@ fn destroy_tun(state: &Arc<Mutex<HelperState>>, name: &str) -> HelperResponse {
     log::info!("Destroying TUN device: {}", name);
 
     let mut state = state.lock().unwrap();
-    if state.tun_devices.remove(name).is_some() {
-        // Device is dropped here, which closes the TUN interface
+    if let Some(info) = state.tun_devices.remove(name) {
+        // Close the file descriptor to destroy the utun
+        unsafe {
+            libc::close(info.fd);
+        }
         HelperResponse {
             success: true,
             message: format!("TUN device {} destroyed", name),
