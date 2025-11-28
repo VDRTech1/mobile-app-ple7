@@ -124,7 +124,7 @@ impl TunnelManager {
             Ok(result) => {
                 log::info!("[TUNNEL] ✓ STUN discovery successful");
                 log::info!("[TUNNEL]   Public endpoint: {}", result.public_addr);
-                log::info!("[TUNNEL]   NAT type: {:?}", result.nat_type);
+                log::info!("[TUNNEL]   Local endpoint: {}", result.local_addr);
                 self.stats.write().public_endpoint = Some(result.public_addr.to_string());
                 Some(result.public_addr)
             }

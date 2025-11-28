@@ -1,6 +1,6 @@
 {
   "name": "ple7-desktop",
-  "version": "0.3.30",
+  "version": "0.3.31",
   "description": "PLE7 Desktop VPN Client",
   "private": true,
   "type": "module",

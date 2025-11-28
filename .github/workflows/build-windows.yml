@@ -1,0 +1,62 @@
+name: Build Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    name: Windows
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download Wintun
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wintun
+          New-Item -ItemType Directory -Force -Path "desktop/src-tauri/resources"
+          Copy-Item "wintun/wintun/bin/amd64/wintun.dll" -Destination "desktop/src-tauri/resources/"
+          Copy-Item "wintun/wintun/bin/amd64/wintun.dll" -Destination "desktop/src-tauri/"
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Configure Windows resources
+        shell: powershell
+        run: |
+          cd desktop/src-tauri
+          $config = Get-Content tauri.conf.json | ConvertFrom-Json
+          $config.bundle | Add-Member -NotePropertyName "resources" -NotePropertyValue @{"resources/wintun.dll" = "wintun.dll"} -Force
+          $config | ConvertTo-Json -Depth 10 | Set-Content tauri.conf.json
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: 'PLE7 Desktop ${{ github.ref_name }}'
+          releaseBody: |
+            ## Download PLE7 Desktop App
+
+            - **Windows**: Download the `.exe` installer
+          releaseDraft: false
+          prerelease: false
