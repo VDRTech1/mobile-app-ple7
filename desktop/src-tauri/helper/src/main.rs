@@ -261,8 +261,9 @@ fn create_utun() -> Result<(i32, String), String> {
     // CTLIOCGINFO = _IOWR('N', 3, struct ctl_info)
     // Manually compute for macOS: IOC_INOUT | (100 << 16) | ('N' << 8) | 3
     // = 0xC0000000 | (0x64 << 16) | (0x4E << 8) | 3 = 0xC0644E03
-    #[allow(non_upper_case_globals)]
-    const CTLIOCGINFO: u64 = 0xC0644E03;
+    // On macOS, ioctl request parameter is c_ulong (unsigned long)
+    #[cfg(target_os = "macos")]
+    const CTLIOCGINFO: libc::c_ulong = 0xC0644E03;
 
     unsafe {
         // Create PF_SYSTEM socket
@@ -279,12 +280,9 @@ fn create_utun() -> Result<(i32, String), String> {
             }
         }
 
-        // Get the control ID
-        // Declare ioctl explicitly for macOS
-        extern "C" {
-            fn ioctl(fd: libc::c_int, request: u64, ...) -> libc::c_int;
-        }
-        let ret = ioctl(fd, CTLIOCGINFO, &mut info as *mut CtlInfo);
+        // Get the control ID using libc::ioctl
+        // On macOS, ioctl signature is: fn(c_int, c_ulong, ...) -> c_int
+        let ret = libc::ioctl(fd, CTLIOCGINFO, &mut info as *mut CtlInfo);
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             libc::close(fd);
