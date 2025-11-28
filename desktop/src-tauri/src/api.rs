@@ -13,6 +13,26 @@ pub struct User {
     pub id: String,
     pub email: String,
     pub plan: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(rename = "mfaEnabled", default)]
+    pub mfa_enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LoginResult {
+    Success {
+        #[serde(rename = "access_token")]
+        token: String,
+        user: User,
+    },
+    MfaRequired {
+        #[serde(rename = "requiresMfa")]
+        requires_mfa: bool,
+        #[serde(rename = "userId")]
+        user_id: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,10 +92,17 @@ impl ApiClient {
             return Err(format!("Login failed: {}", error_text));
         }
 
-        response
-            .json::<LoginResponse>()
+        let result = response
+            .json::<LoginResult>()
             .await
-            .map_err(|e| format!("Failed to parse response: {}", e))
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+        match result {
+            LoginResult::Success { token, user } => Ok(LoginResponse { user, token }),
+            LoginResult::MfaRequired { .. } => {
+                Err("MFA is enabled. Please use the web app to login with MFA.".to_string())
+            }
+        }
     }
 
     pub async fn verify_token(&self, token: &str) -> Result<User, String> {
