@@ -1,6 +1,6 @@
 [package]
 name = "ple7-helper"
-version = "0.3.43"
+version = "0.3.44"
 description = "PLE7 VPN Privileged Helper Daemon"
 authors = ["PLE7"]
 edition = "2021"
