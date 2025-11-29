@@ -513,6 +513,15 @@ mod windows {
             address: Ipv4Addr,
             netmask: Ipv4Addr,
         ) -> Result<Self, String> {
+            // CRITICAL: Capture original default gateway BEFORE any Wintun operations
+            // Must be done first because creating adapter can leave stale routes
+            let original_gateway = Self::get_original_gateway();
+            if let Some(ref gw) = original_gateway {
+                log::info!("Captured original default gateway: {}", gw);
+            } else {
+                log::warn!("Could not determine original default gateway");
+            }
+
             // Find wintun.dll - check multiple locations
             let wintun = Self::load_wintun()?;
 
@@ -557,15 +566,6 @@ mod windows {
                 }
             };
 
-            // IMPORTANT: Capture original default gateway BEFORE configuring TUN
-            // This must happen before any routes are added, otherwise we'll get the VPN gateway
-            let original_gateway = Self::get_original_gateway();
-            if let Some(ref gw) = original_gateway {
-                log::info!("Saved original default gateway: {}", gw);
-            } else {
-                log::warn!("Could not determine original default gateway");
-            }
-
             // Configure IP address using netsh
             Self::configure_address(&adapter, name, address, netmask)?;
 
@@ -591,6 +591,7 @@ mod windows {
         }
 
         /// Get the original default gateway before VPN routes are added
+        /// Filters out VPN addresses (10.x.x.x) and picks the route with lowest metric
         fn get_original_gateway() -> Option<String> {
             use std::process::Command;
             use std::os::windows::process::CommandExt;
@@ -604,29 +605,56 @@ mod windows {
                 .ok()?;
 
             let stdout = String::from_utf8_lossy(&output.stdout);
+            log::debug!("Route print output for gateway detection:\n{}", stdout);
 
-            // Parse route output to find default gateway
+            // Parse route output to find default gateway with lowest metric
             // Format: "0.0.0.0   0.0.0.0   gateway   interface   metric"
+            let mut best_gateway: Option<(String, u32)> = None; // (gateway, metric)
+
             for line in stdout.lines() {
                 let line = line.trim();
                 // Look for lines starting with 0.0.0.0 (default route)
                 if line.starts_with("0.0.0.0") && !line.contains("On-link") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
-                    // parts[0] = 0.0.0.0, parts[1] = 0.0.0.0 (mask), parts[2] = gateway
-                    if parts.len() >= 3 {
+                    // parts[0] = 0.0.0.0, parts[1] = 0.0.0.0 (mask), parts[2] = gateway, parts[3] = interface, parts[4] = metric
+                    if parts.len() >= 5 {
                         let gw = parts[2];
-                        // Validate it's a real IP, not our VPN address
+                        let metric: u32 = parts[4].parse().unwrap_or(9999);
+
+                        // Validate it's a real IP
                         if let Ok(ip) = gw.parse::<std::net::Ipv4Addr>() {
+                            let octets = ip.octets();
+
+                            // Skip VPN addresses (10.x.x.x - common VPN range)
+                            if octets[0] == 10 {
+                                log::debug!("Skipping VPN address {} (metric {})", gw, metric);
+                                continue;
+                            }
+
                             // Skip loopback and link-local
-                            if !ip.is_loopback() && !ip.is_link_local() {
-                                return Some(gw.to_string());
+                            if ip.is_loopback() || ip.is_link_local() {
+                                log::debug!("Skipping loopback/link-local {} (metric {})", gw, metric);
+                                continue;
+                            }
+
+                            log::debug!("Found gateway candidate: {} with metric {}", gw, metric);
+
+                            // Keep the one with lowest metric
+                            if best_gateway.is_none() || metric < best_gateway.as_ref().unwrap().1 {
+                                best_gateway = Some((gw.to_string(), metric));
                             }
                         }
                     }
                 }
             }
 
-            None
+            if let Some((gw, metric)) = best_gateway {
+                log::info!("Selected gateway {} with metric {}", gw, metric);
+                Some(gw)
+            } else {
+                log::warn!("No valid non-VPN gateway found");
+                None
+            }
         }
 
         /// Get interface index by name using multiple methods for reliability
