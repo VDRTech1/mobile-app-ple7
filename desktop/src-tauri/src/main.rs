@@ -17,7 +17,84 @@ use std::io::Write;
 use std::fs::OpenOptions;
 use tauri::{Manager, Emitter};
 use tokio::sync::Mutex;
+use parking_lot::RwLock;
 use tunnel::{TunnelManager, AppState};
+
+// Global log buffer for frontend access
+static LOG_BUFFER: std::sync::OnceLock<Arc<RwLock<Vec<String>>>> = std::sync::OnceLock::new();
+static LOG_BUFFER_SIZE: usize = 500;
+
+fn get_log_buffer() -> Arc<RwLock<Vec<String>>> {
+    LOG_BUFFER.get_or_init(|| Arc::new(RwLock::new(Vec::with_capacity(LOG_BUFFER_SIZE)))).clone()
+}
+
+fn add_to_log_buffer(msg: &str) {
+    let buffer = get_log_buffer();
+    let mut logs = buffer.write();
+    if logs.len() >= LOG_BUFFER_SIZE {
+        logs.remove(0);
+    }
+    logs.push(msg.to_string());
+}
+
+/// Custom logger that captures logs for the UI
+struct UiLogger;
+
+impl log::Log for UiLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            // Use std time - works on all platforms
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let secs = now.as_secs() % 86400; // Seconds since midnight
+            let hours = secs / 3600;
+            let mins = (secs % 3600) / 60;
+            let sec = secs % 60;
+            let millis = now.subsec_millis();
+
+            let level = match record.level() {
+                log::Level::Error => "ERROR",
+                log::Level::Warn => "WARN",
+                log::Level::Info => "INFO",
+                log::Level::Debug => "DEBUG",
+                log::Level::Trace => "TRACE",
+            };
+            let msg = format!("[{:02}:{:02}:{:02}.{:03}] {} {}", hours, mins, sec, millis, level, record.args());
+
+            // Print to stdout/stderr
+            if record.level() <= log::Level::Warn {
+                eprintln!("{}", msg);
+            } else {
+                println!("{}", msg);
+            }
+
+            // Add to UI buffer
+            add_to_log_buffer(&msg);
+
+            // Also write to file
+            log_to_file(&msg);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: UiLogger = UiLogger;
+
+#[tauri::command]
+fn get_logs(since_index: Option<usize>) -> (Vec<String>, usize) {
+    let buffer = get_log_buffer();
+    let logs = buffer.read();
+    let start = since_index.unwrap_or(0);
+    let new_logs: Vec<String> = logs.iter().skip(start).cloned().collect();
+    let current_index = logs.len();
+    (new_logs, current_index)
+}
 
 fn get_log_path() -> std::path::PathBuf {
     // Use ~/Library/Logs on macOS, temp dir on other platforms
@@ -67,8 +144,10 @@ fn main() {
     log_to_file(&format!("OS: {}", std::env::consts::OS));
     log_to_file(&format!("Arch: {}", std::env::consts::ARCH));
 
-    // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Initialize custom logging that captures to UI buffer
+    log::set_logger(&LOGGER)
+        .map(|()| log::set_max_level(log::LevelFilter::Info))
+        .expect("Failed to set logger");
 
     log_to_file("env_logger initialized");
     log::info!("Starting PLE7 VPN...");
@@ -151,6 +230,7 @@ fn main() {
             tunnel::disconnect_vpn,
             tunnel::get_connection_status,
             tunnel::get_connection_stats,
+            get_logs,
         ])
         .run(tauri::generate_context!());
 

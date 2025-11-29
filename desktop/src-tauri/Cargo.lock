@@ -3314,7 +3314,7 @@ checksum = "6f21de1852251c849a53467e0ce8b97cca9d11fd4efa3930145c5d5f02f24447"
 
 [[package]]
 name = "ple7-desktop"
-version = "0.3.50"
+version = "0.3.60"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

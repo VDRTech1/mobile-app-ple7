@@ -85,11 +85,36 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const [logIndex, setLogIndex] = useState(0);
 
   const addLog = (message: string) => {
     const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
     setLogs(prev => [...prev.slice(-100), `[${timestamp}] ${message}`]);
   };
+
+  // Poll for backend logs
+  useEffect(() => {
+    let active = true;
+    const pollLogs = async () => {
+      try {
+        const result = await invoke<[string[], number]>("get_logs", { sinceIndex: logIndex });
+        if (active && result[0].length > 0) {
+          setLogs(prev => [...prev, ...result[0]].slice(-500));
+          setLogIndex(result[1]);
+        }
+      } catch (e) {
+        // Ignore errors - old version may not have this command
+      }
+    };
+
+    const interval = setInterval(pollLogs, 500);
+    pollLogs(); // Initial poll
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [logIndex]);
 
   useEffect(() => {
     addLog("App initialized");
