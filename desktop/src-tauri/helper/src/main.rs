@@ -734,20 +734,20 @@ fn restore_default_gateway(state: &Arc<Mutex<HelperState>>) -> HelperResponse {
 }
 
 fn read_packet(state: &Arc<Mutex<HelperState>>, tun_name: &str, timeout_ms: Option<u64>) -> HelperResponse {
-    let state = state.lock().unwrap();
-
-    let tun_info = match state.tun_devices.get(tun_name) {
-        Some(info) => info,
-        None => {
-            return HelperResponse {
-                success: false,
-                message: format!("TUN device {} not found", tun_name),
-                data: None,
-            };
+    // Get fd without holding lock during blocking read
+    let fd = {
+        let state = state.lock().unwrap();
+        match state.tun_devices.get(tun_name) {
+            Some(info) => info.fd,
+            None => {
+                return HelperResponse {
+                    success: false,
+                    message: format!("TUN device {} not found", tun_name),
+                    data: None,
+                };
+            }
         }
-    };
-
-    let fd = tun_info.fd;
+    }; // Lock released here
 
     // Set read timeout if specified
     if let Some(timeout) = timeout_ms {
@@ -775,12 +775,14 @@ fn read_packet(state: &Arc<Mutex<HelperState>>, tun_name: &str, timeout_ms: Opti
     if n < 0 {
         let err = std::io::Error::last_os_error();
         if err.kind() == std::io::ErrorKind::WouldBlock || err.kind() == std::io::ErrorKind::TimedOut {
+            // Don't log timeouts - they're expected and frequent
             return HelperResponse {
                 success: true,
                 message: "timeout".to_string(),
                 data: None,
             };
         }
+        log::error!("[HELPER] Read failed on {}: {}", tun_name, err);
         return HelperResponse {
             success: false,
             message: format!("Read failed: {}", err),
@@ -789,6 +791,7 @@ fn read_packet(state: &Arc<Mutex<HelperState>>, tun_name: &str, timeout_ms: Opti
     }
 
     if n < 4 {
+        log::warn!("[HELPER] Packet too short: {} bytes", n);
         return HelperResponse {
             success: false,
             message: "Packet too short".to_string(),
@@ -796,8 +799,22 @@ fn read_packet(state: &Arc<Mutex<HelperState>>, tun_name: &str, timeout_ms: Opti
         };
     }
 
-    // Skip 4-byte utun header, return IP packet
+    // Log successful read with packet details
     let packet = &buf[4..n as usize];
+    if packet.len() >= 20 {
+        let src_ip = format!("{}.{}.{}.{}", packet[12], packet[13], packet[14], packet[15]);
+        let dst_ip = format!("{}.{}.{}.{}", packet[16], packet[17], packet[18], packet[19]);
+        let proto = match packet[9] {
+            1 => "ICMP",
+            6 => "TCP",
+            17 => "UDP",
+            _ => "OTHER",
+        };
+        log::info!("[HELPER] TUN READ: {} bytes {} -> {} ({})", packet.len(), src_ip, dst_ip, proto);
+    } else {
+        log::info!("[HELPER] TUN READ: {} bytes (too short for IP header)", packet.len());
+    }
+
     use base64::{Engine as _, engine::general_purpose};
 
     HelperResponse {
