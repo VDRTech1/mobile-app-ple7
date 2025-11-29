@@ -252,7 +252,7 @@ fn handle_command(cmd: HelperCommand, state: &Arc<Mutex<HelperState>>) -> Helper
         }
 
         HelperCommand::AddRoute { destination, prefix_len, gateway } => {
-            add_route(&destination, prefix_len, &gateway)
+            add_route_with_state(state, &destination, prefix_len, &gateway)
         }
 
         HelperCommand::RemoveRoute { destination, prefix_len } => {
@@ -476,12 +476,75 @@ fn destroy_tun(state: &Arc<Mutex<HelperState>>, name: &str) -> HelperResponse {
     }
 }
 
-fn add_route(destination: &str, prefix_len: u8, gateway: &str) -> HelperResponse {
-    log::info!("Adding route: {}/{} via {}", destination, prefix_len, gateway);
-
+fn add_route_via_gateway(destination: &str, prefix_len: u8, gateway: &str) -> HelperResponse {
     let output = Command::new("route")
         .args(["-n", "add", "-net", &format!("{}/{}", destination, prefix_len), gateway])
         .output();
+
+    match output {
+        Ok(output) => {
+            if output.status.success() {
+                HelperResponse {
+                    success: true,
+                    message: "Route added".to_string(),
+                    data: None,
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("File exists") {
+                    HelperResponse {
+                        success: true,
+                        message: "Route already exists".to_string(),
+                        data: None,
+                    }
+                } else {
+                    HelperResponse {
+                        success: false,
+                        message: format!("Failed to add route: {}", stderr),
+                        data: None,
+                    }
+                }
+            }
+        }
+        Err(e) => HelperResponse {
+            success: false,
+            message: format!("Failed to execute route command: {}", e),
+            data: None,
+        },
+    }
+}
+
+fn add_route_with_state(state: &Arc<Mutex<HelperState>>, destination: &str, prefix_len: u8, gateway: &str) -> HelperResponse {
+    log::info!("Adding route: {}/{} via {}", destination, prefix_len, gateway);
+
+    // Find the interface name by looking up the gateway IP in our TUN devices
+    let interface_name = {
+        let state = state.lock().unwrap();
+        let gateway_ip: std::net::Ipv4Addr = match gateway.parse() {
+            Ok(ip) => ip,
+            Err(_) => {
+                log::warn!("Invalid gateway IP: {}, using gateway-based route", gateway);
+                return add_route_via_gateway(destination, prefix_len, gateway);
+            }
+        };
+
+        state.tun_devices.iter()
+            .find(|(_, info)| info.address == gateway_ip)
+            .map(|(name, _)| name.clone())
+    };
+
+    // If we found the interface, use -interface; otherwise fall back to gateway
+    let output = if let Some(ref iface) = interface_name {
+        log::info!("Using interface-based route: {}/{} via interface {}", destination, prefix_len, iface);
+        Command::new("route")
+            .args(["-n", "add", "-net", &format!("{}/{}", destination, prefix_len), "-interface", iface])
+            .output()
+    } else {
+        log::info!("Using gateway-based route: {}/{} via gateway {}", destination, prefix_len, gateway);
+        Command::new("route")
+            .args(["-n", "add", "-net", &format!("{}/{}", destination, prefix_len), gateway])
+            .output()
+    };
 
     match output {
         Ok(output) => {
