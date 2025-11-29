@@ -47,6 +47,17 @@ pub enum HelperCommand {
     },
     #[serde(rename = "restore_default_gateway")]
     RestoreDefaultGateway,
+    #[serde(rename = "read_packet")]
+    ReadPacket {
+        tun_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
+    #[serde(rename = "write_packet")]
+    WritePacket {
+        tun_name: String,
+        data: String, // Base64 encoded
+    },
     #[serde(rename = "status")]
     Status,
     #[serde(rename = "ping")]
@@ -253,6 +264,55 @@ echo 'Helper installed successfully'
     pub fn ping(&mut self) -> Result<bool, String> {
         let response = self.send_command(HelperCommand::Ping)?;
         Ok(response.success && response.message == "pong")
+    }
+
+    /// Read a packet from the TUN device
+    pub fn read_packet(&mut self, tun_name: &str, timeout_ms: Option<u64>) -> Result<Option<Vec<u8>>, String> {
+        use base64::Engine as _;
+
+        let response = self.send_command(HelperCommand::ReadPacket {
+            tun_name: tun_name.to_string(),
+            timeout_ms,
+        })?;
+
+        if !response.success {
+            return Err(response.message);
+        }
+
+        // Check for timeout
+        if response.message == "timeout" {
+            return Ok(None);
+        }
+
+        // Extract packet data from response
+        if let Some(data) = response.data {
+            if let Some(packet_b64) = data.get("packet").and_then(|p| p.as_str()) {
+                let packet = base64::engine::general_purpose::STANDARD
+                    .decode(packet_b64)
+                    .map_err(|e| format!("Failed to decode packet: {}", e))?;
+                return Ok(Some(packet));
+            }
+        }
+
+        Err("No packet data in response".to_string())
+    }
+
+    /// Write a packet to the TUN device
+    pub fn write_packet(&mut self, tun_name: &str, data: &[u8]) -> Result<(), String> {
+        use base64::Engine as _;
+
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
+
+        let response = self.send_command(HelperCommand::WritePacket {
+            tun_name: tun_name.to_string(),
+            data: data_b64,
+        })?;
+
+        if response.success {
+            Ok(())
+        } else {
+            Err(response.message)
+        }
     }
 }
 

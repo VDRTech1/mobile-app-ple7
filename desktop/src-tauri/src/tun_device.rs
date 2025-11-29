@@ -306,16 +306,32 @@ mod macos {
         }
 
         pub async fn read(&self) -> Result<TunPacket, String> {
-            // For now, return an error - we need to implement proper packet capture
-            // The actual WireGuard implementation uses UDP sockets, not TUN reads directly
-            // The TUN device is used by the helper for routing
-            Err("Direct TUN read not implemented - use WireGuard UDP transport".to_string())
+            let name = self.name.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let mut client = HelperClient::new();
+
+                // Use 100ms timeout to prevent blocking forever
+                match client.read_packet(&name, Some(100)) {
+                    Ok(Some(data)) => Ok(TunPacket { data }),
+                    Ok(None) => Err("timeout".to_string()), // Timeout, caller should retry
+                    Err(e) => Err(format!("Failed to read from TUN: {}", e)),
+                }
+            })
+            .await
+            .map_err(|e| format!("Read task failed: {}", e))?
         }
 
-        pub async fn write(&self, _packet: &[u8]) -> Result<(), String> {
-            // For now, return an error - we need to implement proper packet injection
-            // The actual WireGuard implementation uses UDP sockets, not TUN writes directly
-            Err("Direct TUN write not implemented - use WireGuard UDP transport".to_string())
+        pub async fn write(&self, packet: &[u8]) -> Result<(), String> {
+            let name = self.name.clone();
+            let packet = packet.to_vec();
+
+            tokio::task::spawn_blocking(move || {
+                let mut client = HelperClient::new();
+                client.write_packet(&name, &packet)
+            })
+            .await
+            .map_err(|e| format!("Write task failed: {}", e))?
         }
 
         pub async fn add_route(&self, destination: Ipv4Addr, prefix_len: u8) -> Result<(), String> {

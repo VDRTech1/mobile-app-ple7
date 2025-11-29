@@ -47,10 +47,43 @@ enum HelperCommand {
     },
     #[serde(rename = "restore_default_gateway")]
     RestoreDefaultGateway,
+    #[serde(rename = "read_packet")]
+    ReadPacket {
+        tun_name: String,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    #[serde(rename = "write_packet")]
+    WritePacket {
+        tun_name: String,
+        #[serde(with = "base64_serde")]
+        data: Vec<u8>,
+    },
     #[serde(rename = "status")]
     Status,
     #[serde(rename = "ping")]
     Ping,
+}
+
+// Helper module for base64 serialization
+mod base64_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use base64::{Engine as _, engine::general_purpose};
+
+    pub fn serialize<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        general_purpose::STANDARD.decode(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -226,6 +259,14 @@ fn handle_command(cmd: HelperCommand, state: &Arc<Mutex<HelperState>>) -> Helper
 
         HelperCommand::RestoreDefaultGateway => {
             restore_default_gateway(state)
+        }
+
+        HelperCommand::ReadPacket { tun_name, timeout_ms } => {
+            read_packet(state, &tun_name, timeout_ms)
+        }
+
+        HelperCommand::WritePacket { tun_name, data } => {
+            write_packet(state, &tun_name, &data)
         }
     }
 }
@@ -571,5 +612,135 @@ fn restore_default_gateway(state: &Arc<Mutex<HelperState>>) -> HelperResponse {
         success: true,
         message: "Default gateway restored".to_string(),
         data: None,
+    }
+}
+
+fn read_packet(state: &Arc<Mutex<HelperState>>, tun_name: &str, timeout_ms: Option<u64>) -> HelperResponse {
+    let state = state.lock().unwrap();
+
+    let tun_info = match state.tun_devices.get(tun_name) {
+        Some(info) => info,
+        None => {
+            return HelperResponse {
+                success: false,
+                message: format!("TUN device {} not found", tun_name),
+                data: None,
+            };
+        }
+    };
+
+    let fd = tun_info.fd;
+
+    // Set read timeout if specified
+    if let Some(timeout) = timeout_ms {
+        let tv = libc::timeval {
+            tv_sec: (timeout / 1000) as i64,
+            tv_usec: ((timeout % 1000) * 1000) as i32,
+        };
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                &tv as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            );
+        }
+    }
+
+    // Read from utun - utun packets have a 4-byte header (AF family)
+    let mut buf = vec![0u8; 65535];
+    let n = unsafe {
+        libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+    };
+
+    if n < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock || err.kind() == std::io::ErrorKind::TimedOut {
+            return HelperResponse {
+                success: true,
+                message: "timeout".to_string(),
+                data: None,
+            };
+        }
+        return HelperResponse {
+            success: false,
+            message: format!("Read failed: {}", err),
+            data: None,
+        };
+    }
+
+    if n < 4 {
+        return HelperResponse {
+            success: false,
+            message: "Packet too short".to_string(),
+            data: None,
+        };
+    }
+
+    // Skip 4-byte utun header, return IP packet
+    let packet = &buf[4..n as usize];
+    use base64::{Engine as _, engine::general_purpose};
+
+    HelperResponse {
+        success: true,
+        message: "ok".to_string(),
+        data: Some(serde_json::json!({
+            "packet": general_purpose::STANDARD.encode(packet),
+            "length": packet.len(),
+        })),
+    }
+}
+
+fn write_packet(state: &Arc<Mutex<HelperState>>, tun_name: &str, data: &[u8]) -> HelperResponse {
+    let state = state.lock().unwrap();
+
+    let tun_info = match state.tun_devices.get(tun_name) {
+        Some(info) => info,
+        None => {
+            return HelperResponse {
+                success: false,
+                message: format!("TUN device {} not found", tun_name),
+                data: None,
+            };
+        }
+    };
+
+    let fd = tun_info.fd;
+
+    // Prepare packet with utun header
+    // utun header: 4 bytes, first 4 bytes indicate address family
+    // AF_INET = 2 on macOS (little endian: 02 00 00 00)
+    let mut packet = Vec::with_capacity(4 + data.len());
+
+    // Detect IP version from first nibble
+    let af = if !data.is_empty() && (data[0] >> 4) == 6 {
+        libc::AF_INET6 as u32  // IPv6
+    } else {
+        libc::AF_INET as u32   // IPv4
+    };
+
+    packet.extend_from_slice(&af.to_ne_bytes());
+    packet.extend_from_slice(data);
+
+    let n = unsafe {
+        libc::write(fd, packet.as_ptr() as *const libc::c_void, packet.len())
+    };
+
+    if n < 0 {
+        let err = std::io::Error::last_os_error();
+        return HelperResponse {
+            success: false,
+            message: format!("Write failed: {}", err),
+            data: None,
+        };
+    }
+
+    HelperResponse {
+        success: true,
+        message: "ok".to_string(),
+        data: Some(serde_json::json!({
+            "written": n - 4,  // Subtract header bytes
+        })),
     }
 }
