@@ -556,13 +556,20 @@ pub struct PeerConfig {
 // Windows Admin Check
 // ============================================================================
 
-/// Check if running as Administrator on Windows
+/// Check if running as Administrator on Windows (without flashing cmd window)
 #[cfg(target_os = "windows")]
 fn is_running_as_admin() -> bool {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
 
-    // Use 'net session' command - it fails if not running as admin
-    match Command::new("net").args(["session"]).output() {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // Use 'net session' command with hidden window - fails if not admin
+    match Command::new("net")
+        .args(["session"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
         Ok(output) => output.status.success(),
         Err(_) => false,
     }
