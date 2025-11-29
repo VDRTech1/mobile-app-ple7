@@ -136,62 +136,8 @@ impl TunnelManager {
             }
         };
 
-        // Phase 2: Connect WebSocket for real-time peer updates (optional - VPN works via relay without it)
-        log::info!("[TUNNEL] Phase 2: WebSocket connection (optional)...");
-        let ws_url = format!("{}/ws/mesh", api_base_url.replace("http://", "ws://").replace("https://", "wss://"));
-        log::info!("[TUNNEL]   WebSocket URL: {}", ws_url);
-
-        let ws_config = WsConfig {
-            base_url: api_base_url.to_string(),
-            token: token.to_string(),
-            device_id: device_id.to_string(),
-            reconnect_interval: Duration::from_secs(5),
-        };
-
-        let ws_client = ManagedWsClient::new(ws_config);
-        let _status_clone = self.status.clone();
-
-        // Try to start WebSocket - but don't fail if it doesn't work
-        // The VPN will still function via relay, just without real-time P2P updates
-        log::info!("[TUNNEL]   Attempting WebSocket connection...");
-        let ws_connected = match ws_client.start(Box::new(move |event| {
-            match event {
-                WsEvent::PeerEndpointUpdate { device_id, public_key, endpoint } => {
-                    log::info!("Peer endpoint update: {} -> {}", public_key, endpoint);
-                }
-                WsEvent::PeerOnline { device_id, .. } => {
-                    log::info!("Peer came online: {}", device_id);
-                }
-                WsEvent::PeerOffline { device_id } => {
-                    log::info!("Peer went offline: {}", device_id);
-                }
-                _ => {}
-            }
-        })).await {
-            Ok(_) => {
-                log::info!("WebSocket connected for real-time peer updates");
-                true
-            }
-            Err(e) => {
-                log::warn!("WebSocket connection failed: {}. Continuing without real-time updates.", e);
-                false
-            }
-        };
-
-        // Only try to register/subscribe if WebSocket connected
-        if ws_connected {
-            if let Some(endpoint) = public_endpoint {
-                if let Err(e) = ws_client.register_endpoint(endpoint).await {
-                    log::warn!("Failed to register endpoint: {}", e);
-                }
-            }
-            if let Err(e) = ws_client.subscribe(network_id).await {
-                log::warn!("Failed to subscribe to network: {}", e);
-            }
-            *self.ws_client.lock().await = Some(ws_client);
-        }
-
-        // Phase 3: Create and start WireGuard tunnel
+        // Phase 2: Create WireGuard tunnel first (needed for WebSocket callback)
+        log::info!("[TUNNEL] Phase 2: Creating WireGuard tunnel...");
         *self.status.write() = ConnectionStatus::Handshaking;
 
         let tunnel = WgTunnel::new(wg_config).await?;
@@ -214,6 +160,79 @@ impl TunnelManager {
 
         *self.wg_tunnel.lock().await = Some(tunnel);
         self.is_running.store(true, Ordering::SeqCst);
+
+        // Phase 3: Connect WebSocket for real-time peer updates (optional - VPN works via relay without it)
+        log::info!("[TUNNEL] Phase 3: WebSocket connection for P2P...");
+        let ws_config = WsConfig {
+            base_url: api_base_url.to_string(),
+            token: token.to_string(),
+            device_id: device_id.to_string(),
+            reconnect_interval: Duration::from_secs(5),
+        };
+
+        let ws_client = ManagedWsClient::new(ws_config);
+
+        // Clone the tunnel Arc for use in the callback
+        let tunnel_for_callback = self.wg_tunnel.clone();
+
+        // Try to start WebSocket with callback that updates peer endpoints
+        log::info!("[TUNNEL]   Attempting WebSocket connection...");
+        let ws_connected = match ws_client.start(Box::new(move |event| {
+            match event {
+                WsEvent::PeerEndpointUpdate { device_id, public_key, endpoint } => {
+                    log::info!("[P2P] Peer endpoint update: {} ({}) -> {}", device_id, public_key, endpoint);
+
+                    // Parse endpoint and update WireGuard peer
+                    if let Ok(addr) = endpoint.parse::<std::net::SocketAddr>() {
+                        // Decode public key from base64
+                        if let Ok(key_bytes) = base64::engine::general_purpose::STANDARD.decode(&public_key) {
+                            if key_bytes.len() == 32 {
+                                let mut key_array = [0u8; 32];
+                                key_array.copy_from_slice(&key_bytes);
+
+                                // Try to update peer endpoint in WireGuard tunnel
+                                let tunnel_clone = tunnel_for_callback.clone();
+                                tokio::spawn(async move {
+                                    if let Some(tun) = tunnel_clone.lock().await.as_ref() {
+                                        tun.update_peer_endpoint(&key_array, addr);
+                                        log::info!("[P2P] Updated peer {} to direct endpoint {}", &public_key[..8], addr);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+                WsEvent::PeerOnline { device_id, .. } => {
+                    log::info!("[P2P] Peer came online: {}", device_id);
+                }
+                WsEvent::PeerOffline { device_id } => {
+                    log::info!("[P2P] Peer went offline: {}", device_id);
+                }
+                _ => {}
+            }
+        })).await {
+            Ok(_) => {
+                log::info!("[TUNNEL] WebSocket connected for real-time P2P updates");
+                true
+            }
+            Err(e) => {
+                log::warn!("[TUNNEL] WebSocket connection failed: {}. P2P won't work, using relay.", e);
+                false
+            }
+        };
+
+        // Register our endpoint and subscribe to network updates
+        if ws_connected {
+            if let Some(endpoint) = public_endpoint {
+                if let Err(e) = ws_client.register_endpoint(endpoint).await {
+                    log::warn!("[TUNNEL] Failed to register endpoint: {}", e);
+                }
+            }
+            if let Err(e) = ws_client.subscribe(network_id).await {
+                log::warn!("[TUNNEL] Failed to subscribe to network: {}", e);
+            }
+            *self.ws_client.lock().await = Some(ws_client);
+        }
 
         // Determine connection type
         let connection_type = if public_endpoint.is_some() {

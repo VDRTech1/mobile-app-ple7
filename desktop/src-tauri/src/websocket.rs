@@ -1,5 +1,6 @@
 //! WebSocket client for real-time peer updates from the control plane
 //! Receives peer endpoint updates for NAT traversal and direct P2P connections
+//! Uses Socket.IO protocol format (42["event",{data}])
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
@@ -66,6 +68,76 @@ pub enum WsMessage {
 
 /// Callback for handling WebSocket events
 pub type EventCallback = Box<dyn Fn(WsEvent) + Send + Sync>;
+
+/// Parse Socket.IO message format: "42[\"event_name\",{data}]"
+fn parse_socketio_message(text: &str) -> Option<WsEvent> {
+    // Socket.IO message types:
+    // 0 = CONNECT, 2 = EVENT, 3 = ACK, 4 = CONNECT_ERROR, 40 = CONNECT (namespace), 42 = EVENT (namespace)
+    // We're interested in 42 (EVENT with default namespace) or just 2 (EVENT)
+
+    let text = text.trim();
+
+    // Handle Socket.IO CONNECT response (0 or 40)
+    if text.starts_with("0{") || text == "40" || text.starts_with("40{") {
+        log::debug!("[WS] Socket.IO connect acknowledgement");
+        return None;
+    }
+
+    // Handle Socket.IO EVENT (42["event",data] or 2["event",data])
+    let json_start = if text.starts_with("42") {
+        2
+    } else if text.starts_with("2[") {
+        1
+    } else {
+        log::debug!("[WS] Unknown Socket.IO message type: {}", &text[..text.len().min(50)]);
+        return None;
+    };
+
+    let json_part = &text[json_start..];
+
+    // Parse as JSON array: ["event_name", {data}]
+    match serde_json::from_str::<Value>(json_part) {
+        Ok(Value::Array(arr)) if arr.len() >= 2 => {
+            let event_name = arr[0].as_str()?;
+            let data = &arr[1];
+
+            match event_name {
+                "peer_endpoint_update" => {
+                    let device_id = data.get("deviceId")?.as_str()?.to_string();
+                    let public_key = data.get("publicKey")?.as_str()?.to_string();
+                    let endpoint = data.get("endpoint")?.as_str()?.to_string();
+                    Some(WsEvent::PeerEndpointUpdate { device_id, public_key, endpoint })
+                }
+                "peer_online" => {
+                    let device_id = data.get("deviceId")?.as_str()?.to_string();
+                    let public_key = data.get("publicKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    Some(WsEvent::PeerOnline { device_id, public_key })
+                }
+                "peer_offline" => {
+                    let device_id = data.get("deviceId")?.as_str()?.to_string();
+                    Some(WsEvent::PeerOffline { device_id })
+                }
+                _ => {
+                    log::debug!("[WS] Unknown Socket.IO event: {}", event_name);
+                    None
+                }
+            }
+        }
+        Ok(_) => {
+            log::debug!("[WS] Socket.IO message not an array: {}", json_part);
+            None
+        }
+        Err(e) => {
+            log::debug!("[WS] Failed to parse Socket.IO JSON: {} - {}", e, json_part);
+            None
+        }
+    }
+}
+
+/// Format message for Socket.IO: 42["event",{data}]
+fn format_socketio_message(event: &str, data: &Value) -> String {
+    format!("42{}", serde_json::to_string(&serde_json::json!([event, data])).unwrap_or_default())
+}
 
 /// WebSocket connection state
 #[derive(Debug, Clone, PartialEq)]
@@ -147,12 +219,33 @@ impl WsClient {
         let peer_endpoints = self.peer_endpoints.clone();
         let device_id = self.device_id.clone();
 
-        // Spawn write task
+        // Spawn write task - sends Socket.IO formatted messages
         let state_write = state.clone();
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                let json = serde_json::to_string(&msg).unwrap();
-                if let Err(e) = write.send(Message::Text(json)).await {
+                // Format message as Socket.IO EVENT: 42["event_name",{data}]
+                let socketio_msg = match &msg {
+                    WsMessage::RegisterEndpoint { device_id, endpoint } => {
+                        format_socketio_message("register_endpoint", &serde_json::json!({
+                            "deviceId": device_id,
+                            "endpoint": endpoint
+                        }))
+                    }
+                    WsMessage::Subscribe { network_id } => {
+                        format_socketio_message("subscribe", &serde_json::json!({
+                            "networkId": network_id
+                        }))
+                    }
+                    WsMessage::Unsubscribe { network_id } => {
+                        format_socketio_message("unsubscribe", &serde_json::json!({
+                            "networkId": network_id
+                        }))
+                    }
+                    WsMessage::Pong => "3".to_string(), // Socket.IO PONG
+                };
+
+                log::debug!("[WS] Sending: {}", &socketio_msg[..socketio_msg.len().min(100)]);
+                if let Err(e) = write.send(Message::Text(socketio_msg)).await {
                     log::error!("WebSocket send error: {}", e);
                     *state_write.write() = WsState::Disconnected;
                     break;
@@ -160,35 +253,30 @@ impl WsClient {
             }
         });
 
-        // Spawn read task
+        // Spawn read task - parses Socket.IO formatted messages
         let tx_pong = tx.clone();
         tokio::spawn(async move {
             while let Some(result) = read.next().await {
                 match result {
                     Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<WsEvent>(&text) {
-                            Ok(event) => {
-                                // Handle special events
-                                match &event {
-                                    WsEvent::Ping => {
-                                        let _ = tx_pong.send(WsMessage::Pong).await;
-                                    }
-                                    WsEvent::PeerEndpointUpdate { public_key, endpoint, .. } => {
-                                        if let Ok(addr) = endpoint.parse::<SocketAddr>() {
-                                            peer_endpoints.write().insert(public_key.clone(), addr);
-                                            log::info!("Updated peer endpoint: {} -> {}", public_key, endpoint);
-                                        }
-                                    }
-                                    _ => {}
-                                }
+                        log::debug!("[WS] Received: {}", &text[..text.len().min(200)]);
 
-                                // Call registered callbacks
-                                for callback in callbacks.read().iter() {
-                                    callback(event.clone());
+                        // Parse Socket.IO message format
+                        if let Some(event) = parse_socketio_message(&text) {
+                            // Handle special events
+                            match &event {
+                                WsEvent::PeerEndpointUpdate { public_key, endpoint, .. } => {
+                                    if let Ok(addr) = endpoint.parse::<SocketAddr>() {
+                                        peer_endpoints.write().insert(public_key.clone(), addr);
+                                        log::info!("[P2P] Received peer endpoint: {} -> {}", &public_key[..8], endpoint);
+                                    }
                                 }
+                                _ => {}
                             }
-                            Err(e) => {
-                                log::warn!("Failed to parse WebSocket message: {} - {}", e, text);
+
+                            // Call registered callbacks
+                            for callback in callbacks.read().iter() {
+                                callback(event.clone());
                             }
                         }
                     }
@@ -197,7 +285,7 @@ impl WsClient {
                         *state.write() = WsState::Disconnected;
                         break;
                     }
-                    Ok(Message::Ping(data)) => {
+                    Ok(Message::Ping(_)) => {
                         // Tungstenite handles pong automatically
                     }
                     Err(e) => {
