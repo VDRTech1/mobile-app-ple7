@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { load } from "@tauri-apps/plugin-store";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Network,
@@ -86,6 +87,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [logIndex, setLogIndex] = useState(0);
+  const pendingConnectChecked = useRef(false);
 
   const addLog = (message: string) => {
     const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
@@ -116,6 +118,46 @@ export default function Dashboard({ onLogout }: DashboardProps) {
     };
   }, [logIndex]);
 
+  // Check for pending connection on startup (after UAC elevation)
+  const checkPendingConnection = async () => {
+    if (pendingConnectChecked.current) return;
+    pendingConnectChecked.current = true;
+
+    try {
+      const store = await load("pending.json", { autoSave: true });
+      const pending = await store.get<{
+        networkId: string;
+        networkName: string;
+        exitNode: ExitNodeOption | null;
+      }>("pendingConnect");
+
+      if (pending) {
+        addLog(`Found pending connection for network: ${pending.networkName}`);
+        // Clear it immediately so we don't retry on next restart
+        await store.delete("pendingConnect");
+        await store.save();
+
+        // Wait for networks to load, then auto-connect
+        setTimeout(async () => {
+          const network = networks.find(n => n.id === pending.networkId);
+          if (network) {
+            setSelectedNetwork(network);
+            if (pending.exitNode) {
+              setSelectedExitNode(pending.exitNode);
+            }
+            addLog("Auto-connecting after elevation...");
+            // Small delay to ensure state is set
+            setTimeout(() => {
+              handleConnect();
+            }, 500);
+          }
+        }, 1000);
+      }
+    } catch (e) {
+      // Ignore errors - store may not exist
+    }
+  };
+
   useEffect(() => {
     addLog("App initialized");
     loadNetworks();
@@ -125,6 +167,13 @@ export default function Dashboard({ onLogout }: DashboardProps) {
       addLog(`Version: ${v}`);
     }).catch(() => {});
   }, []);
+
+  // Check for pending connection after networks are loaded
+  useEffect(() => {
+    if (networks.length > 0 && !pendingConnectChecked.current) {
+      checkPendingConnection();
+    }
+  }, [networks]);
 
   useEffect(() => {
     if (selectedNetwork) {
@@ -199,6 +248,20 @@ export default function Dashboard({ onLogout }: DashboardProps) {
       return;
     }
 
+    // Save pending connection state BEFORE attempting (in case UAC triggers restart)
+    try {
+      const store = await load("pending.json", { autoSave: true });
+      await store.set("pendingConnect", {
+        networkId: selectedNetwork.id,
+        networkName: selectedNetwork.name,
+        exitNode: selectedExitNode,
+      });
+      await store.save();
+      addLog("Saved pending connection state");
+    } catch (e) {
+      addLog(`Warning: Could not save pending state: ${e}`);
+    }
+
     setConnectionStatus("connecting");
     setError("");
     addLog(`Connecting to network: ${selectedNetwork.name}`);
@@ -237,10 +300,29 @@ export default function Dashboard({ onLogout }: DashboardProps) {
 
       addLog("VPN connected successfully");
       setConnectionStatus("connected");
+
+      // Clear pending connection state on success
+      try {
+        const store = await load("pending.json", { autoSave: true });
+        await store.delete("pendingConnect");
+        await store.save();
+      } catch (e) {
+        // Ignore
+      }
     } catch (err: any) {
       addLog(`ERROR connecting: ${err}`);
       setError(err.toString());
       setConnectionStatus("disconnected");
+
+      // Clear pending connection state on error
+      // (if UAC caused restart, this won't run in the old process)
+      try {
+        const store = await load("pending.json", { autoSave: true });
+        await store.delete("pendingConnect");
+        await store.save();
+      } catch (e) {
+        // Ignore
+      }
     }
   };
 
