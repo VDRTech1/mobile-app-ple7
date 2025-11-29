@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { load } from "@tauri-apps/plugin-store";
+import { LazyStore } from "@tauri-apps/plugin-store";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Network,
@@ -124,7 +124,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
     pendingConnectChecked.current = true;
 
     try {
-      const store = await load("pending.json", { autoSave: true });
+      const store = new LazyStore("pending.json");
       const pending = await store.get<{
         networkId: string;
         networkName: string;
@@ -250,7 +250,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
 
     // Save pending connection state BEFORE attempting (in case UAC triggers restart)
     try {
-      const store = await load("pending.json", { autoSave: true });
+      const store = new LazyStore("pending.json");
       await store.set("pendingConnect", {
         networkId: selectedNetwork.id,
         networkName: selectedNetwork.name,
@@ -303,7 +303,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
 
       // Clear pending connection state on success
       try {
-        const store = await load("pending.json", { autoSave: true });
+        const store = new LazyStore("pending.json");
         await store.delete("pendingConnect");
         await store.save();
       } catch (e) {
@@ -317,7 +317,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
       // Clear pending connection state on error
       // (if UAC caused restart, this won't run in the old process)
       try {
-        const store = await load("pending.json", { autoSave: true });
+        const store = new LazyStore("pending.json");
         await store.delete("pendingConnect");
         await store.save();
       } catch (e) {
