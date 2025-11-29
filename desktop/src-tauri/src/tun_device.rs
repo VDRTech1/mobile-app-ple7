@@ -625,9 +625,9 @@ mod windows {
                         if let Ok(ip) = gw.parse::<std::net::Ipv4Addr>() {
                             let octets = ip.octets();
 
-                            // Skip VPN addresses (10.x.x.x - common VPN range)
-                            if octets[0] == 10 {
-                                log::debug!("Skipping VPN address {} (metric {})", gw, metric);
+                            // Skip our VPN subnet (10.100.x.x) - not all 10.x.x.x as users may have corporate networks
+                            if octets[0] == 10 && octets[1] == 100 {
+                                log::debug!("Skipping our VPN subnet {} (metric {})", gw, metric);
                                 continue;
                             }
 
