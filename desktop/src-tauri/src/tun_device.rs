@@ -552,32 +552,86 @@ mod windows {
             })
         }
 
-        /// Get interface index by name using netsh
+        /// Get interface index by name using multiple methods for reliability
         fn get_interface_index(name: &str) -> Result<u32, String> {
             use std::process::Command;
+            use std::os::windows::process::CommandExt;
 
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+            // Method 1: Try PowerShell (most reliable)
+            log::info!("Getting interface index for '{}' via PowerShell...", name);
+            let ps_output = Command::new("powershell")
+                .args([
+                    "-NoProfile", "-NonInteractive", "-Command",
+                    &format!("(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex", name)
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+
+            if let Ok(output) = ps_output {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if let Ok(idx) = stdout.parse::<u32>() {
+                    log::info!("PowerShell: interface index = {}", idx);
+                    return Ok(idx);
+                }
+            }
+
+            // Method 2: Try netsh interface show interface
+            log::info!("Trying netsh method...");
             let output = Command::new("netsh")
                 .args(["interface", "ipv4", "show", "interfaces"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output()
                 .map_err(|e| format!("Failed to get interfaces: {}", e))?;
 
             let stdout = String::from_utf8_lossy(&output.stdout);
+            log::debug!("netsh output:\n{}", stdout);
 
             // Parse output to find interface index by name
             // Format: "Idx     Met         MTU          State                Name"
             for line in stdout.lines() {
-                if line.contains(name) {
+                // Case-insensitive match and handle partial matches
+                if line.to_lowercase().contains(&name.to_lowercase()) {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if let Some(idx_str) = parts.first() {
                         if let Ok(idx) = idx_str.parse::<u32>() {
+                            log::info!("netsh: interface index = {}", idx);
                             return Ok(idx);
                         }
                     }
                 }
             }
 
-            // Default to a reasonable value if not found
-            log::warn!("Could not find interface index for {}, using default", name);
+            // Method 3: Try route print to find interface by IP address
+            log::info!("Trying route print method...");
+            let route_output = Command::new("route")
+                .args(["print"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+
+            if let Ok(output) = route_output {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Look for "10.100.0" in the interface list section
+                // The format is: "idx  metric  name"
+                for line in stdout.lines() {
+                    if line.contains("10.100.0") || line.to_lowercase().contains(&name.to_lowercase()) {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        // Try to find a number that looks like an interface index
+                        for part in parts.iter().take(3) {
+                            if let Ok(idx) = part.parse::<u32>() {
+                                if idx > 0 && idx < 1000 {
+                                    log::info!("route print: interface index = {}", idx);
+                                    return Ok(idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Default: return 0 and log warning
+            log::warn!("Could not find interface index for '{}', routing may fail", name);
             Ok(0)
         }
 
@@ -640,24 +694,34 @@ mod windows {
 
             tokio::task::spawn_blocking(move || {
                 use std::process::Command;
+                use std::os::windows::process::CommandExt;
 
-                // Use IF parameter to specify the interface
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                let mask = Self::prefix_to_mask(prefix_len);
+
+                log::info!("Adding route: {}/{} via {} IF {}", destination, prefix_len, address, if_index);
+
+                // Use IF parameter and metric to specify the interface
                 let output = Command::new("route")
                     .args([
                         "add",
                         &destination.to_string(),
                         "mask",
-                        &Self::prefix_to_mask(prefix_len).to_string(),
+                        &mask.to_string(),
                         &address.to_string(),
+                        "metric", "1",
                         "IF",
                         &if_index.to_string(),
                     ])
+                    .creation_flags(CREATE_NO_WINDOW)
                     .output()
                     .map_err(|e| format!("Failed to execute route: {}", e))?;
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(format!("Failed to add route: {}", stderr));
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    log::warn!("Route add warning: stdout={}, stderr={}", stdout, stderr);
+                    // Don't fail on route add errors - the route might already exist
                 }
 
                 Ok(())
@@ -673,12 +737,16 @@ mod windows {
 
             tokio::task::spawn_blocking(move || {
                 use std::process::Command;
+                use std::os::windows::process::CommandExt;
+
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
 
                 // Add bypass route for excluded IP via default gateway (NOT through VPN interface)
                 if let Some(ref ip) = exclude {
                     // Get current default gateway using route print
                     let output = Command::new("route")
                         .args(["print", "0.0.0.0"])
+                        .creation_flags(CREATE_NO_WINDOW)
                         .output()
                         .map_err(|e| format!("Failed to get routes: {}", e))?;
 
@@ -693,6 +761,7 @@ mod windows {
                                     log::info!("Adding bypass route for {} via {}", ip, gw);
                                     Command::new("route")
                                         .args(["add", ip, "mask", "255.255.255.255", gw])
+                                        .creation_flags(CREATE_NO_WINDOW)
                                         .output()
                                         .ok(); // Ignore errors (may already exist)
                                     break;
@@ -702,25 +771,64 @@ mod windows {
                     }
                 }
 
-                // Add split routes through VPN interface (use IF to specify interface)
-                log::info!("Adding default routes through VPN interface {}", if_index);
+                // Add split routes through VPN interface with low metric to ensure priority
+                log::info!("Adding default routes through VPN interface {} (gateway {})", if_index, address);
 
+                // Use metric 1 to ensure VPN routes have highest priority
+                // Delete any existing routes first to avoid conflicts
+                let _ = Command::new("route")
+                    .args(["delete", "0.0.0.0", "mask", "128.0.0.0"])
+                    .creation_flags(0x08000000)
+                    .output();
+                let _ = Command::new("route")
+                    .args(["delete", "128.0.0.0", "mask", "128.0.0.0"])
+                    .creation_flags(0x08000000)
+                    .output();
+
+                let cmd1 = format!("route add 0.0.0.0 mask 128.0.0.0 {} metric 1 IF {}", address, if_index);
+                log::info!("Executing: {}", cmd1);
                 let output1 = Command::new("route")
-                    .args(["add", "0.0.0.0", "mask", "128.0.0.0", &address.to_string(), "IF", &if_index.to_string()])
+                    .args(["add", "0.0.0.0", "mask", "128.0.0.0", &address.to_string(), "metric", "1", "IF", &if_index.to_string()])
+                    .creation_flags(0x08000000)
                     .output()
                     .map_err(|e| format!("Failed to add route: {}", e))?;
 
                 if !output1.status.success() {
-                    log::warn!("Route 0.0.0.0/1 add warning: {}", String::from_utf8_lossy(&output1.stderr));
+                    let stderr = String::from_utf8_lossy(&output1.stderr);
+                    let stdout = String::from_utf8_lossy(&output1.stdout);
+                    log::warn!("Route 0.0.0.0/1 add: stdout={}, stderr={}", stdout, stderr);
+                } else {
+                    log::info!("Route 0.0.0.0/1 added successfully");
                 }
 
+                let cmd2 = format!("route add 128.0.0.0 mask 128.0.0.0 {} metric 1 IF {}", address, if_index);
+                log::info!("Executing: {}", cmd2);
                 let output2 = Command::new("route")
-                    .args(["add", "128.0.0.0", "mask", "128.0.0.0", &address.to_string(), "IF", &if_index.to_string()])
+                    .args(["add", "128.0.0.0", "mask", "128.0.0.0", &address.to_string(), "metric", "1", "IF", &if_index.to_string()])
+                    .creation_flags(0x08000000)
                     .output()
                     .map_err(|e| format!("Failed to add route: {}", e))?;
 
                 if !output2.status.success() {
-                    log::warn!("Route 128.0.0.0/1 add warning: {}", String::from_utf8_lossy(&output2.stderr));
+                    let stderr = String::from_utf8_lossy(&output2.stderr);
+                    let stdout = String::from_utf8_lossy(&output2.stdout);
+                    log::warn!("Route 128.0.0.0/1 add: stdout={}, stderr={}", stdout, stderr);
+                } else {
+                    log::info!("Route 128.0.0.0/1 added successfully");
+                }
+
+                // Print the routing table for debugging
+                log::info!("Current VPN routes:");
+                if let Ok(route_out) = Command::new("route")
+                    .args(["print", "0.0.0.0"])
+                    .creation_flags(0x08000000)
+                    .output()
+                {
+                    for line in String::from_utf8_lossy(&route_out.stdout).lines() {
+                        if line.contains("0.0.0.0") || line.contains("128.0.0.0") {
+                            log::info!("  {}", line);
+                        }
+                    }
                 }
 
                 Ok(())
