@@ -176,8 +176,10 @@ impl TunnelManager {
         let tunnel_for_callback = self.wg_tunnel.clone();
 
         // Try to start WebSocket with callback that updates peer endpoints
+        // Pass endpoint and network_id so they're registered after connection
         log::info!("[TUNNEL]   Attempting WebSocket connection...");
-        let ws_connected = match ws_client.start(Box::new(move |event| {
+        let ws_connected = match ws_client.start_with_registration(
+            Box::new(move |event| {
             match event {
                 WsEvent::PeerEndpointUpdate { device_id, public_key, endpoint } => {
                     log::info!("[P2P] Peer endpoint update: {} ({}) -> {}", device_id, public_key, endpoint);
@@ -210,9 +212,12 @@ impl TunnelManager {
                 }
                 _ => {}
             }
-        })).await {
+        }),
+            public_endpoint,
+            Some(network_id.to_string()),
+        ).await {
             Ok(_) => {
-                log::info!("[TUNNEL] WebSocket connected for real-time P2P updates");
+                log::info!("[TUNNEL] WebSocket started for real-time P2P updates");
                 true
             }
             Err(e) => {
@@ -221,16 +226,8 @@ impl TunnelManager {
             }
         };
 
-        // Register our endpoint and subscribe to network updates
+        // Store WebSocket client
         if ws_connected {
-            if let Some(endpoint) = public_endpoint {
-                if let Err(e) = ws_client.register_endpoint(endpoint).await {
-                    log::warn!("[TUNNEL] Failed to register endpoint: {}", e);
-                }
-            }
-            if let Err(e) = ws_client.subscribe(network_id).await {
-                log::warn!("[TUNNEL] Failed to subscribe to network: {}", e);
-            }
             *self.ws_client.lock().await = Some(ws_client);
         }
 

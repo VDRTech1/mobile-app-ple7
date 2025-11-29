@@ -368,7 +368,13 @@ impl ManagedWsClient {
     }
 
     /// Start the managed WebSocket connection with auto-reconnect
-    pub async fn start(&self, on_event: EventCallback) -> Result<(), String> {
+    /// Optionally registers endpoint and subscribes to network after connection
+    pub async fn start_with_registration(
+        &self,
+        on_event: EventCallback,
+        public_endpoint: Option<SocketAddr>,
+        network_id: Option<String>,
+    ) -> Result<(), String> {
         use std::sync::atomic::Ordering;
 
         if self.running.load(Ordering::SeqCst) {
@@ -397,8 +403,37 @@ impl ManagedWsClient {
 
                 match ws_client.connect().await {
                     Ok(()) => {
+                        log::info!("WebSocket connected, registering device...");
+
+                        // Register endpoint immediately after connection
+                        if let Some(endpoint) = public_endpoint {
+                            if let Some(tx) = &ws_client.tx {
+                                if let Err(e) = tx.send(WsMessage::RegisterEndpoint {
+                                    device_id: config.device_id.clone(),
+                                    endpoint: endpoint.to_string(),
+                                }).await {
+                                    log::warn!("Failed to register endpoint: {}", e);
+                                } else {
+                                    log::info!("Registered endpoint: {}", endpoint);
+                                }
+                            }
+                        }
+
+                        // Subscribe to network
+                        if let Some(ref net_id) = network_id {
+                            if let Some(tx) = &ws_client.tx {
+                                if let Err(e) = tx.send(WsMessage::Subscribe {
+                                    network_id: net_id.clone(),
+                                }).await {
+                                    log::warn!("Failed to subscribe to network: {}", e);
+                                } else {
+                                    log::info!("Subscribed to network: {}", net_id);
+                                }
+                            }
+                        }
+
                         *client.write() = Some(ws_client);
-                        log::info!("WebSocket connected, monitoring...");
+                        log::info!("WebSocket ready for P2P updates");
 
                         // Monitor connection
                         loop {
@@ -432,6 +467,11 @@ impl ManagedWsClient {
         });
 
         Ok(())
+    }
+
+    /// Start the managed WebSocket connection with auto-reconnect (legacy)
+    pub async fn start(&self, on_event: EventCallback) -> Result<(), String> {
+        self.start_with_registration(on_event, None, None).await
     }
 
     /// Stop the managed connection
