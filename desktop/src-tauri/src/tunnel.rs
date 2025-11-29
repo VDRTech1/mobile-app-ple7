@@ -344,12 +344,18 @@ pub async fn connect_vpn(
 ) -> Result<(), String> {
     log::info!("========== VPN CONNECTION START ==========");
 
-    // Windows: Check if running as Administrator
+    // Windows: Check if running as Administrator, request elevation if not
     #[cfg(target_os = "windows")]
     {
         if !is_running_as_admin() {
-            log::error!("Not running as Administrator!");
-            return Err("Administrator privileges required. Please right-click the app and select 'Run as administrator', or reinstall the app.".to_string());
+            log::warn!("Not running as Administrator, requesting elevation...");
+            // Try to re-launch with admin privileges
+            if let Err(e) = request_elevation() {
+                log::error!("Failed to request elevation: {}", e);
+                return Err("Administrator privileges required. Please right-click the app and select 'Run as administrator'.".to_string());
+            }
+            // If we get here, elevation was requested but process didn't exit (shouldn't happen)
+            return Err("Elevation requested. Please restart the app.".to_string());
         }
         log::info!("[ADMIN] ✓ Running as Administrator");
     }
@@ -572,5 +578,73 @@ fn is_running_as_admin() -> bool {
     {
         Ok(output) => output.status.success(),
         Err(_) => false,
+    }
+}
+
+/// Request elevation on Windows using ShellExecuteW with "runas" verb
+/// This re-launches the app with admin privileges and exits the current process
+#[cfg(target_os = "windows")]
+fn request_elevation() -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ffi::OsStr;
+
+    // Get current executable path
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("Failed to get executable path: {}", e))?;
+
+    log::info!("[ELEVATION] Requesting admin privileges for: {:?}", exe_path);
+
+    // Convert path to wide string for Windows API
+    let exe_wide: Vec<u16> = OsStr::new(&exe_path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let runas_wide: Vec<u16> = OsStr::new("runas")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::Win32::Foundation::HWND;
+        use windows::core::PCWSTR;
+
+        let result = ShellExecuteW(
+            HWND::default(),
+            PCWSTR::from_raw(runas_wide.as_ptr()),
+            PCWSTR::from_raw(exe_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+
+        // ShellExecuteW returns HINSTANCE, values > 32 indicate success
+        let result_code = result.0 as isize;
+        if result_code > 32 {
+            log::info!("[ELEVATION] Successfully launched elevated process");
+            // Exit this non-elevated process
+            std::process::exit(0);
+        } else {
+            // Error codes: https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shellexecutew
+            let error_msg = match result_code {
+                0 => "Out of memory",
+                2 => "File not found",
+                3 => "Path not found",
+                5 => "Access denied",
+                8 => "Not enough memory",
+                26 => "Sharing violation",
+                27 => "Invalid filename association",
+                28 => "DDE timeout",
+                29 => "DDE fail",
+                30 => "DDE busy",
+                31 => "No association",
+                32 => "DLL not found",
+                _ => "Unknown error",
+            };
+            log::error!("[ELEVATION] Failed to elevate: {} (code {})", error_msg, result_code);
+            Err(format!("Failed to request elevation: {} (code {})", error_msg, result_code))
+        }
     }
 }
