@@ -49,7 +49,11 @@ pub enum WsEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WsMessage {
-    /// Register this device with its public endpoint
+    /// Register this device (makes it show as online)
+    RegisterDevice {
+        device_id: String,
+    },
+    /// Register this device with its public endpoint (for P2P)
     RegisterEndpoint {
         device_id: String,
         endpoint: String,
@@ -225,6 +229,11 @@ impl WsClient {
             while let Some(msg) = rx.recv().await {
                 // Format message as Socket.IO EVENT: 42["event_name",{data}]
                 let socketio_msg = match &msg {
+                    WsMessage::RegisterDevice { device_id } => {
+                        format_socketio_message("register_device", &serde_json::json!({
+                            "deviceId": device_id
+                        }))
+                    }
                     WsMessage::RegisterEndpoint { device_id, endpoint } => {
                         format_socketio_message("register_endpoint", &serde_json::json!({
                             "deviceId": device_id,
@@ -405,7 +414,18 @@ impl ManagedWsClient {
                     Ok(()) => {
                         log::info!("WebSocket connected, registering device...");
 
-                        // Register endpoint immediately after connection
+                        // Always register device first (shows as online)
+                        if let Some(tx) = &ws_client.tx {
+                            if let Err(e) = tx.send(WsMessage::RegisterDevice {
+                                device_id: config.device_id.clone(),
+                            }).await {
+                                log::warn!("Failed to register device: {}", e);
+                            } else {
+                                log::info!("Device registered: {}", config.device_id);
+                            }
+                        }
+
+                        // Register endpoint if STUN succeeded (enables P2P)
                         if let Some(endpoint) = public_endpoint {
                             if let Some(tx) = &ws_client.tx {
                                 if let Err(e) = tx.send(WsMessage::RegisterEndpoint {
@@ -414,9 +434,11 @@ impl ManagedWsClient {
                                 }).await {
                                     log::warn!("Failed to register endpoint: {}", e);
                                 } else {
-                                    log::info!("Registered endpoint: {}", endpoint);
+                                    log::info!("Registered P2P endpoint: {}", endpoint);
                                 }
                             }
+                        } else {
+                            log::warn!("No public endpoint (STUN failed) - P2P unavailable, using relay only");
                         }
 
                         // Subscribe to network
@@ -433,7 +455,8 @@ impl ManagedWsClient {
                         }
 
                         *client.write() = Some(ws_client);
-                        log::info!("WebSocket ready for P2P updates");
+                        log::info!("WebSocket ready for P2P updates (endpoint: {})",
+                            public_endpoint.map(|e| e.to_string()).unwrap_or_else(|| "relay-only".to_string()));
 
                         // Monitor connection
                         loop {

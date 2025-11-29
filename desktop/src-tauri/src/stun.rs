@@ -56,10 +56,12 @@ impl StunClient {
             .map_err(|e| format!("Failed to get local address: {}", e))?;
 
         // Try each STUN server until one works
-        for server in STUN_SERVERS {
+        let mut errors = Vec::new();
+        for (i, server) in STUN_SERVERS.iter().enumerate() {
+            log::info!("[STUN] Trying server {}/{}: {}", i + 1, STUN_SERVERS.len(), server);
             match self.query_stun_server(&socket, server) {
                 Ok(public_addr) => {
-                    log::info!("STUN discovery successful: {} -> {} (via {})",
+                    log::info!("[STUN] ✓ Success! {} -> {} (via {})",
                         local_addr, public_addr, server);
                     return Ok(StunResult {
                         public_addr,
@@ -68,13 +70,16 @@ impl StunClient {
                     });
                 }
                 Err(e) => {
-                    log::debug!("STUN server {} failed: {}", server, e);
+                    log::warn!("[STUN] ✗ Server {} failed: {}", server, e);
+                    errors.push(format!("{}: {}", server, e));
                     continue;
                 }
             }
         }
 
-        Err("All STUN servers failed".to_string())
+        let error_summary = errors.join("; ");
+        log::error!("[STUN] All {} servers failed. Details: {}", STUN_SERVERS.len(), error_summary);
+        Err(format!("All STUN servers failed: {}", error_summary))
     }
 
     /// Discover public endpoint using a specific local port

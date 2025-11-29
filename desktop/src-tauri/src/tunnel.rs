@@ -120,18 +120,25 @@ impl TunnelManager {
         log::info!("[TUNNEL] Phase 1: STUN endpoint discovery...");
         *self.status.write() = ConnectionStatus::DiscoveringEndpoint;
         let stun_client = AsyncStunClient::new();
-        log::info!("[TUNNEL]   Contacting STUN servers...");
+        log::info!("[TUNNEL]   Contacting STUN servers (timeout: 3s each)...");
+        log::info!("[TUNNEL]   STUN servers: stun.l.google.com:19302, stun.cloudflare.com:3478, ...");
         let public_endpoint = match stun_client.discover_public_endpoint().await {
             Ok(result) => {
-                log::info!("[TUNNEL] ✓ STUN discovery successful");
-                log::info!("[TUNNEL]   Public endpoint: {}", result.public_addr);
+                log::info!("[TUNNEL] ✓ STUN discovery successful!");
+                log::info!("[TUNNEL]   Public endpoint: {} (this is your NAT-mapped address)", result.public_addr);
                 log::info!("[TUNNEL]   Local endpoint: {}", result.local_addr);
+                log::info!("[TUNNEL]   STUN server used: {}", result.stun_server);
                 self.stats.write().public_endpoint = Some(result.public_addr.to_string());
                 Some(result.public_addr)
             }
             Err(e) => {
-                log::warn!("[TUNNEL] ⚠ STUN discovery failed: {}", e);
-                log::warn!("[TUNNEL]   Will use relay instead of direct P2P");
+                log::warn!("[TUNNEL] ⚠ STUN discovery FAILED: {}", e);
+                log::warn!("[TUNNEL]   This means P2P is not available - traffic will go through relay");
+                log::warn!("[TUNNEL]   Common causes:");
+                log::warn!("[TUNNEL]     - Firewall blocking UDP to ports 19302/3478");
+                log::warn!("[TUNNEL]     - Network (hotspot/corporate) restricts STUN");
+                log::warn!("[TUNNEL]     - Symmetric NAT that doesn't allow STUN");
+                log::warn!("[TUNNEL]   VPN will still work via relay, just with higher latency");
                 None
             }
         };
