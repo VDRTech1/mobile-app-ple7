@@ -428,6 +428,7 @@ mod windows {
         address: Ipv4Addr,
         #[allow(dead_code)]
         netmask: Ipv4Addr,
+        interface_index: u32,
     }
 
     impl WindowsTun {
@@ -521,11 +522,15 @@ mod windows {
             // Configure IP address using netsh
             Self::configure_address(&adapter, name, address, netmask)?;
 
+            // Get interface index for routing
+            let interface_index = Self::get_interface_index(name)?;
+            log::info!("Wintun adapter interface index: {}", interface_index);
+
             // Start session
             let session = adapter.start_session(RING_CAPACITY)
                 .map_err(|e| format!("Failed to start Wintun session: {}", e))?;
 
-            log::info!("Windows TUN device created: {}", name);
+            log::info!("Windows TUN device created: {} (IF {})", name, interface_index);
 
             Ok(Self {
                 session: Arc::new(session),
@@ -533,7 +538,37 @@ mod windows {
                 name: name.to_string(),
                 address,
                 netmask,
+                interface_index,
             })
+        }
+
+        /// Get interface index by name using netsh
+        fn get_interface_index(name: &str) -> Result<u32, String> {
+            use std::process::Command;
+
+            let output = Command::new("netsh")
+                .args(["interface", "ipv4", "show", "interfaces"])
+                .output()
+                .map_err(|e| format!("Failed to get interfaces: {}", e))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            // Parse output to find interface index by name
+            // Format: "Idx     Met         MTU          State                Name"
+            for line in stdout.lines() {
+                if line.contains(name) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(idx_str) = parts.first() {
+                        if let Ok(idx) = idx_str.parse::<u32>() {
+                            return Ok(idx);
+                        }
+                    }
+                }
+            }
+
+            // Default to a reasonable value if not found
+            log::warn!("Could not find interface index for {}, using default", name);
+            Ok(0)
         }
 
         fn configure_address(_adapter: &Adapter, name: &str, address: Ipv4Addr, netmask: Ipv4Addr) -> Result<(), String> {
@@ -591,10 +626,12 @@ mod windows {
 
         pub async fn add_route(&self, destination: Ipv4Addr, prefix_len: u8) -> Result<(), String> {
             let address = self.address;
+            let if_index = self.interface_index;
 
             tokio::task::spawn_blocking(move || {
                 use std::process::Command;
 
+                // Use IF parameter to specify the interface
                 let output = Command::new("route")
                     .args([
                         "add",
@@ -602,6 +639,8 @@ mod windows {
                         "mask",
                         &Self::prefix_to_mask(prefix_len).to_string(),
                         &address.to_string(),
+                        "IF",
+                        &if_index.to_string(),
                     ])
                     .output()
                     .map_err(|e| format!("Failed to execute route: {}", e))?;
@@ -620,11 +659,12 @@ mod windows {
         pub async fn set_default_gateway(&self, exclude_ip: Option<&str>) -> Result<(), String> {
             let address = self.address;
             let exclude = exclude_ip.map(|s| s.to_string());
+            let if_index = self.interface_index;
 
             tokio::task::spawn_blocking(move || {
                 use std::process::Command;
 
-                // Add bypass route for excluded IP via default gateway
+                // Add bypass route for excluded IP via default gateway (NOT through VPN interface)
                 if let Some(ref ip) = exclude {
                     // Get current default gateway using route print
                     let output = Command::new("route")
@@ -652,15 +692,26 @@ mod windows {
                     }
                 }
 
-                Command::new("route")
-                    .args(["add", "0.0.0.0", "mask", "128.0.0.0", &address.to_string()])
+                // Add split routes through VPN interface (use IF to specify interface)
+                log::info!("Adding default routes through VPN interface {}", if_index);
+
+                let output1 = Command::new("route")
+                    .args(["add", "0.0.0.0", "mask", "128.0.0.0", &address.to_string(), "IF", &if_index.to_string()])
                     .output()
                     .map_err(|e| format!("Failed to add route: {}", e))?;
 
-                Command::new("route")
-                    .args(["add", "128.0.0.0", "mask", "128.0.0.0", &address.to_string()])
+                if !output1.status.success() {
+                    log::warn!("Route 0.0.0.0/1 add warning: {}", String::from_utf8_lossy(&output1.stderr));
+                }
+
+                let output2 = Command::new("route")
+                    .args(["add", "128.0.0.0", "mask", "128.0.0.0", &address.to_string(), "IF", &if_index.to_string()])
                     .output()
                     .map_err(|e| format!("Failed to add route: {}", e))?;
+
+                if !output2.status.success() {
+                    log::warn!("Route 128.0.0.0/1 add warning: {}", String::from_utf8_lossy(&output2.stderr));
+                }
 
                 Ok(())
             })
