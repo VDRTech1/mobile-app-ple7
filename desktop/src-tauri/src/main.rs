@@ -15,26 +15,27 @@ mod helper_client;
 use std::sync::Arc;
 use std::io::Write;
 use std::fs::OpenOptions;
+use std::collections::VecDeque;
 use tauri::{Manager, Emitter};
 use tokio::sync::Mutex;
 use parking_lot::RwLock;
 use tunnel::{TunnelManager, AppState};
 
 // Global log buffer for frontend access
-static LOG_BUFFER: std::sync::OnceLock<Arc<RwLock<Vec<String>>>> = std::sync::OnceLock::new();
+static LOG_BUFFER: std::sync::OnceLock<Arc<RwLock<VecDeque<String>>>> = std::sync::OnceLock::new();
 static LOG_BUFFER_SIZE: usize = 500;
 
-fn get_log_buffer() -> Arc<RwLock<Vec<String>>> {
-    LOG_BUFFER.get_or_init(|| Arc::new(RwLock::new(Vec::with_capacity(LOG_BUFFER_SIZE)))).clone()
+fn get_log_buffer() -> Arc<RwLock<VecDeque<String>>> {
+    LOG_BUFFER.get_or_init(|| Arc::new(RwLock::new(VecDeque::with_capacity(LOG_BUFFER_SIZE)))).clone()
 }
 
 fn add_to_log_buffer(msg: &str) {
     let buffer = get_log_buffer();
     let mut logs = buffer.write();
     if logs.len() >= LOG_BUFFER_SIZE {
-        logs.remove(0);
+        logs.pop_front(); // O(1) instead of O(n)
     }
-    logs.push(msg.to_string());
+    logs.push_back(msg.to_string());
 }
 
 /// Custom logger that captures logs for the UI
