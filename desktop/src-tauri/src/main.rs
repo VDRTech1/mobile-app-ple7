@@ -113,17 +113,25 @@ fn get_log_path() -> std::path::PathBuf {
 }
 
 fn log_to_file(msg: &str) {
-    let log_path = get_log_path();
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
+    // Skip file logging in release builds for performance
+    #[cfg(debug_assertions)]
     {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = writeln!(file, "[{}] {}", timestamp, msg);
+        let log_path = get_log_path();
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = writeln!(file, "[{}] {}", timestamp, msg);
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = msg; // Suppress unused warning
     }
 }
 
