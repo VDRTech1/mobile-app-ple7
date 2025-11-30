@@ -97,7 +97,6 @@ export default function Dashboard({ onLogout }: DashboardProps) {
       }>("pendingConnect");
 
       if (pending) {
-        addLog(`Found pending connection for network: ${pending.networkName}`);
         // Clear it immediately so we don't retry on next restart
         await store.delete("pendingConnect");
         await store.save();
@@ -110,7 +109,6 @@ export default function Dashboard({ onLogout }: DashboardProps) {
             if (pending.exitNode) {
               setSelectedExitNode(pending.exitNode);
             }
-            addLog("Auto-connecting after elevation...");
             // Small delay to ensure state is set
             setTimeout(() => {
               handleConnect();
@@ -124,12 +122,10 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   };
 
   useEffect(() => {
-    addLog("App initialized");
     loadNetworks();
     loadRelays();
     getVersion().then(v => {
       setAppVersion(v);
-      addLog(`Version: ${v}`);
     }).catch(() => {});
   }, []);
 
@@ -149,16 +145,12 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   const loadNetworks = async () => {
     try {
       setLoading(true);
-      addLog("Loading networks...");
       const data = await invoke<NetworkData[]>("get_networks");
-      addLog(`Loaded ${data.length} networks`);
       setNetworks(data);
       if (data.length > 0) {
         setSelectedNetwork(data[0]);
-        addLog(`Selected network: ${data[0].name}`);
       }
     } catch (err: any) {
-      addLog(`ERROR loading networks: ${err}`);
       setError(err.toString());
     } finally {
       setLoading(false);
@@ -167,21 +159,16 @@ export default function Dashboard({ onLogout }: DashboardProps) {
 
   const loadRelays = async () => {
     try {
-      addLog("Loading relays...");
       const data = await invoke<Relay[]>("get_relays");
-      addLog(`Loaded ${data.length} relays`);
       setRelays(data);
     } catch (err: any) {
-      addLog(`ERROR loading relays: ${err}`);
       console.error("Failed to load relays:", err);
     }
   };
 
   const loadExitNodes = async (networkId: string) => {
     try {
-      addLog(`Loading devices for network ${networkId}...`);
       const devices = await invoke<Device[]>("get_devices", { networkId });
-      addLog(`Loaded ${devices.length} devices`);
       // Filter to only show devices that can be exit nodes (routers, firewalls, servers)
       const exitNodeDevices = devices.filter(d =>
         d.is_exit_node && ["ROUTER", "FIREWALL", "SERVER"].includes(d.platform)
@@ -193,7 +180,6 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         setSelectedExitNode({ id: "none", name: "None (mesh only)", type: "none" });
       }
     } catch (err: any) {
-      addLog(`ERROR loading exit nodes: ${err}`);
       console.error("Failed to load exit nodes:", err);
     }
   };
@@ -209,7 +195,6 @@ export default function Dashboard({ onLogout }: DashboardProps) {
 
   const handleConnect = async () => {
     if (!selectedNetwork) {
-      addLog("ERROR: No network selected");
       return;
     }
 
@@ -222,40 +207,33 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         exitNode: selectedExitNode,
       });
       await store.save();
-      addLog("Saved pending connection state");
     } catch (e) {
-      addLog(`Warning: Could not save pending state: ${e}`);
+      // Ignore - store save is optional
     }
 
     setConnectionStatus("connecting");
     setError("");
-    addLog(`Connecting to network: ${selectedNetwork.name}`);
 
     try {
       // Auto-register this device
       const deviceName = getDeviceName();
-      addLog(`Auto-registering device: ${deviceName}`);
       const device = await invoke<Device>("auto_register_device", {
         networkId: selectedNetwork.id,
         deviceName,
       });
-      addLog(`Device registered: ${device.id} (${device.ip_address})`);
 
       setConnectedDevice(device);
 
       // Set exit node on backend (triggers relay VRF/WG configuration)
       const exitNodeType = selectedExitNode?.type || "none";
       const exitNodeId = selectedExitNode?.type !== "none" ? selectedExitNode?.id : null;
-      addLog(`Setting exit node: ${exitNodeType}${exitNodeId ? ` (${exitNodeId})` : ''}...`);
       await invoke("set_exit_node", {
         networkId: selectedNetwork.id,
         exitType: exitNodeType,
         exitId: exitNodeId,
       });
-      addLog("Exit node configured on relay");
 
       // Connect VPN
-      addLog(`Connecting VPN with device ${device.id}...`);
       await invoke("connect_vpn", {
         deviceId: device.id,
         networkId: selectedNetwork.id,
@@ -263,7 +241,6 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         exitNodeId,
       });
 
-      addLog("VPN connected successfully");
       setConnectionStatus("connected");
 
       // Clear pending connection state on success
@@ -275,12 +252,10 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         // Ignore
       }
     } catch (err: any) {
-      addLog(`ERROR connecting: ${err}`);
       setError(err.toString());
       setConnectionStatus("disconnected");
 
       // Clear pending connection state on error
-      // (if UAC caused restart, this won't run in the old process)
       try {
         const store = new LazyStore("pending.json");
         await store.delete("pendingConnect");
