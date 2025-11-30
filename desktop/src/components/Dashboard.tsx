@@ -18,9 +18,6 @@ import {
   RefreshCw,
   Router,
   Server,
-  Terminal,
-  X,
-  Copy,
 } from "lucide-react";
 import PleiadesLogo from "./PleiadesLogo";
 
@@ -84,39 +81,7 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   const [error, setError] = useState("");
   const [appVersion, setAppVersion] = useState("");
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
-  const [showLogs, setShowLogs] = useState(false);
-  const [logs, setLogs] = useState<string[]>([]);
-  const [logIndex, setLogIndex] = useState(0);
   const pendingConnectChecked = useRef(false);
-
-  const addLog = (message: string) => {
-    const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
-    setLogs(prev => [...prev.slice(-100), `[${timestamp}] ${message}`]);
-  };
-
-  // Poll for backend logs
-  useEffect(() => {
-    let active = true;
-    const pollLogs = async () => {
-      try {
-        const result = await invoke<[string[], number]>("get_logs", { sinceIndex: logIndex });
-        if (active && result[0].length > 0) {
-          setLogs(prev => [...prev, ...result[0]].slice(-500));
-          setLogIndex(result[1]);
-        }
-      } catch (e) {
-        // Ignore errors - old version may not have this command
-      }
-    };
-
-    const interval = setInterval(pollLogs, 500);
-    pollLogs(); // Initial poll
-
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
-  }, [logIndex]);
 
   // Check for pending connection on startup (after UAC elevation)
   const checkPendingConnection = async () => {
@@ -368,22 +333,13 @@ export default function Dashboard({ onLogout }: DashboardProps) {
             <span className="text-primary">7</span>
           </div>
         </div>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => setShowLogs(true)}
-            className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-            title="View logs"
-          >
-            <Terminal className="w-5 h-5" />
-          </button>
-          <button
-            onClick={onLogout}
-            className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-            title="Sign out"
-          >
-            <LogOut className="w-5 h-5" />
-          </button>
-        </div>
+        <button
+          onClick={onLogout}
+          className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          title="Sign out"
+        >
+          <LogOut className="w-5 h-5" />
+        </button>
       </div>
 
       {/* Connection Status Card */}
@@ -713,66 +669,6 @@ export default function Dashboard({ onLogout }: DashboardProps) {
         <span>&copy; 2025 PLE7</span>
       </div>
 
-      {/* Logs Modal */}
-      <AnimatePresence>
-        {showLogs && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
-            onClick={() => setShowLogs(false)}
-          >
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              onClick={(e) => e.stopPropagation()}
-              className="bg-card border rounded-2xl w-full max-w-lg max-h-[80vh] flex flex-col"
-            >
-              <div className="flex items-center justify-between p-4 border-b">
-                <h3 className="font-semibold">Debug Logs</h3>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(logs.join('\n'));
-                    }}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                    title="Copy logs"
-                  >
-                    <Copy className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => setShowLogs(false)}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-              <div className="flex-1 overflow-auto p-4">
-                <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap">
-                  {logs.length > 0 ? logs.join('\n') : 'No logs yet...'}
-                </pre>
-              </div>
-              <div className="p-4 border-t flex gap-2">
-                <button
-                  onClick={() => setLogs([])}
-                  className="flex-1 py-2 text-sm text-muted-foreground hover:text-foreground border rounded-lg hover:bg-muted transition-colors"
-                >
-                  Clear Logs
-                </button>
-                <button
-                  onClick={() => setShowLogs(false)}
-                  className="flex-1 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity"
-                >
-                  Close
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
